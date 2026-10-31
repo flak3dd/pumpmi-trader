@@ -60,6 +60,7 @@ def _flow(buyers=16):
         "meaningful_buyers": buyers, "trades": buyers + 2,
         "last_window_buyers": buyers, "last_window_top_pct": 12.0, "last_window_buy_sol": 0.8,
         "last_window_signed_sol": 0.8, "last_window_imbalance": 4.0,
+        "round_trip_pct": 0.0, "last_window_round_trip_pct": 0.0,
     }
 
 
@@ -101,6 +102,8 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["flow_last_window_min_buyers"] == 3
     assert STRAT["flow_last_window_max_whale_pct"] == 50
     assert STRAT["flow_last_window_min_bs_ratio"] == 1.3
+    assert STRAT["flow_max_round_trip_pct"] == 50
+    assert STRAT["impact_max_drag_pct"] == -10
     assert STRAT["profit_lock_arm_pct"] == 8
     assert STRAT["profit_lock_giveback_pct"] == 6
     try:
@@ -397,3 +400,40 @@ def test_last_window_net_sell_skips_before_a_paper_buy(tmp_path: Path) -> None:
         assert not feed.pos
         assert feed.ledger.skips[-1][1].startswith("flow last window imbalance")
         assert feed.ledger.fills == []
+
+
+def test_round_trip_and_thin_dollar_depth_skip_before_a_paper_buy(tmp_path: Path) -> None:
+    """Same-wallet churn and a size that cannot pay for the curve both skip.
+
+    The churn tape clears buyers, whale, top-3, meaningful, and 1.3 imbalance.
+    The thin book is a $2,000 spot with the test reserves: a $130 flat round trip
+    is about -13%, and a -15% net stop on that notional is -19.50. Skipping pays 0.
+    """
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    holder = {"coin": _coin(symbol="WASH", mint="wash-mint-0001"), "flow": dict(_flow(16), round_trip_pct=55.0, last_window_round_trip_pct=10.0)}
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(holder["coin"])):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since, _last=None: holder["flow"]
+        _run_watch(feed, holder["coin"], now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("flow round trip")
+        assert feed.ledger.fills == []
+
+        now[0] = 1000.0
+        holder["coin"] = _coin(symbol="THIN", mint="thin-mint-0001", usd_market_cap=2_000)
+        holder["flow"] = _flow(16)
+        _run_watch(feed, holder["coin"], now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("curve impact")
+        assert feed.ledger.fills == []
+        assert STRAT["size_min"] * -0.15 == -19.5

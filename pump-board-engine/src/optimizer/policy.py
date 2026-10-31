@@ -10,6 +10,7 @@ from copy import deepcopy
 import math
 from typing import Any
 
+from ..curve import flat_round_trip_pct, sol_price_usd
 from ..exits import profit_lock_hit
 
 
@@ -22,6 +23,10 @@ WATCH_TIERS = ("short", "medium", "long")
 # Short-window curve points below this are dust. About 0.02 SOL on a typical curve,
 # above a 4-decimal reserve print. One sample that fills every tier is not three windows.
 CURVE_RATE_DUST_PTS = 0.05
+# Flat-spot round trip worse than this is skipped. Checked at the top of the
+# $130–160 band so a smaller fill is never the size we failed to price.
+IMPACT_MAX_DRAG_PCT = -10.0
+IMPACT_CHECK_USD = 160.0
 RISK_LIMITS = {
     "min_curve_pct": 25.0,
     "max_curve_pct": 85.0,
@@ -314,12 +319,52 @@ def watch_entry_reason(observation: dict[str, Any], watch: dict[str, Any]) -> st
     return None
 
 
+def _positive_int(value: Any) -> int | None:
+    """Lamports and raw token reserves stay integers. Floats are not exact enough."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def impact_entry_reason(observation: dict[str, Any]) -> str | None:
+    """Skip when this paper size loses more than the drag limit if spot does not move.
+
+    Reserves that are absent keep the previous flat fee model, so older rows are
+    unchanged. When reserves are present the SOL price is the observation's quote,
+    or the price implied by those reserves and the USD market cap. This is a paper
+    filter, not a claim that the skipped trade would have lost money.
+    """
+    virtual_sol = _positive_int(observation.get("virtual_sol"))
+    virtual_token = _positive_int(observation.get("virtual_token"))
+    if virtual_sol is None or virtual_token is None:
+        return None
+    sol_usd = _finite_number(observation.get("sol_usd"))
+    if sol_usd is None or sol_usd <= 0:
+        sol_usd = sol_price_usd(float(observation.get("market_cap") or 0), virtual_sol, virtual_token)
+    drag = flat_round_trip_pct(
+        float(observation.get("market_cap") or 0),
+        IMPACT_CHECK_USD,
+        sol_usd,
+        virtual_sol,
+        virtual_token,
+        FEE_BPS,
+    )
+    if drag is None or drag + 1e-9 >= IMPACT_MAX_DRAG_PCT:
+        return None
+    return f"curve impact {drag:.1f}% worse than {IMPACT_MAX_DRAG_PCT:g}%"
+
+
 def entry_reason(observation: dict[str, Any], watch: dict[str, Any]) -> str | None:
     """Apply unchanged risk caps plus shared flow/checkpoint entry requirements."""
     reason = risk_reason(observation)
     if reason is not None:
         return f"risk check 1/3: {reason}"
-    return watch_entry_reason(observation, watch)
+    reason = watch_entry_reason(observation, watch)
+    if reason is not None:
+        return reason
+    return impact_entry_reason(observation)
 
 
 def initial_portfolio() -> dict[str, Any]:

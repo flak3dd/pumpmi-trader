@@ -44,12 +44,13 @@ def parse_curve_account(data: bytes) -> dict | None:
     }
 
 
-def curve_progress_from_account_data(data: bytes | str | list | None) -> float | None:
-    """Reserve progress from a base64 or raw account blob. None when it cannot be read.
+# Pump.fun standard: 1e9 tokens at 6 decimals. Used only to imply a paper SOL price
+# from reserves and a USD market cap when the payload has no SOL quote.
+PUMP_TOKEN_SUPPLY_RAW = 1_000_000_000_000_000
 
-    A missing or truncated account is not market-cap / 69_000. Callers must skip
-    the entry rather than invent a curve percent.
-    """
+
+def parse_curve_account_data(data: bytes | str | list | None) -> dict | None:
+    """Full reserve words from a base64 or raw account blob. None when unreadable."""
     if isinstance(data, list):
         data = data[0] if data else None
     if isinstance(data, str):
@@ -59,10 +60,45 @@ def curve_progress_from_account_data(data: bytes | str | list | None) -> float |
             return None
     if not isinstance(data, (bytes, bytearray)):
         return None
-    parsed = parse_curve_account(bytes(data))
+    return parse_curve_account(bytes(data))
+
+
+def curve_progress_from_account_data(data: bytes | str | list | None) -> float | None:
+    """Reserve progress from a base64 or raw account blob. None when it cannot be read.
+
+    A missing or truncated account is not market-cap / 69_000. Callers must skip
+    the entry rather than invent a curve percent.
+    """
+    parsed = parse_curve_account_data(data)
     if not parsed:
         return None
     return float(parsed["curve_pct"])
+
+
+def sol_price_usd(usd_mcap: float, virtual_sol: int | None, virtual_token: int | None,
+                  supply_raw: int = PUMP_TOKEN_SUPPLY_RAW) -> float | None:
+    """USD per SOL implied by the curve spot and a USD market cap.
+
+    ``mcap_sol = virtual_sol_human * supply_raw / virtual_token`` is the constant-product
+    spot when supply and the virtual token reserve share raw decimals. An explicit
+    SOL quote should win over this. None means the paper price cannot be formed.
+    """
+    try:
+        usd = float(usd_mcap)
+        v_sol = int(virtual_sol) / 1e9 if virtual_sol is not None else 0.0
+        v_tok = int(virtual_token) if virtual_token is not None else 0
+        supply = int(supply_raw)
+    except (TypeError, ValueError):
+        return None
+    if usd <= 0 or v_sol <= 0 or v_tok <= 0 or supply <= 0:
+        return None
+    mcap_sol = v_sol * supply / v_tok
+    if mcap_sol <= 0:
+        return None
+    price = usd / mcap_sol
+    if price < 1.0 or price > 100_000.0:
+        return None
+    return price
 
 
 def _fee_rate(fee_bps: float) -> float:
@@ -106,3 +142,23 @@ def sell_eff(spot_mcap: float, tokens: float | None, virtual_sol: int | None, vi
     spot_sol = float(tokens) * v_sol / virtual_token
     ratio = (sol_out / spot_sol) if spot_sol > 0 else (1.0 - fee)
     return spot * ratio
+
+
+def flat_round_trip_pct(spot_mcap: float, usd: float, sol_px: float | None, virtual_sol: int | None,
+                        virtual_token: int | None, fee_bps: float) -> float | None:
+    """Net percent of a paper round trip if the spot market cap does not move.
+
+    None when fee-only is the best model available (missing SOL price or reserves).
+    A largely negative result means this size pays for the curve before any adverse move.
+    """
+    spot = float(spot_mcap or 0)
+    if spot <= 0:
+        return None
+    filled = buy_fill(spot, float(usd), sol_px, virtual_sol, virtual_token, fee_bps)
+    if not filled.get("impact") or not filled.get("tokens"):
+        return None
+    exited = sell_eff(spot, filled["tokens"], virtual_sol, virtual_token, fee_bps)
+    entry = float(filled["entry_eff"])
+    if entry <= 0:
+        return None
+    return 100.0 * (exited / entry - 1.0)
