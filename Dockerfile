@@ -3,18 +3,19 @@ FROM node:22-bookworm-slim AS frontend
 WORKDIR /app
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-RUN corepack enable && corepack prepare pnpm@11.25.0 --activate 
+RUN corepack enable && corepack prepare pnpm@11.25.0 --activate \
     && pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm build
 
-# The runtime contains the checked-in engine assets and the stdlib HTTP adapter.
+# Runtime database credentials are supplied by hosting. No DSN is baked into this image.
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PUMPMI_ENV=production \
+    PUMPMI_OPTIMIZER_ENABLED=1 \
     HOST=0.0.0.0 \
     PORT=3000
 

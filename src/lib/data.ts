@@ -84,7 +84,7 @@ export type Trade = {
 export type Snapshot = {
   strategyConfig?: StrategyConfig;
   board: {
-    ts: number;
+    ts: number | null;
     mode: string;
     bankroll: number;
     equity: number;
@@ -105,7 +105,7 @@ export type Snapshot = {
   };
   trades: Record<string, Trade>;
   meta: {
-    kind: "snapshot" | "fixture";
+    kind: "snapshot" | "fixture" | "live" | "awaiting" | "stale";
     label: string;
     updated?: string;
     simulationAvailable: boolean;

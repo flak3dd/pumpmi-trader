@@ -33,6 +33,68 @@ MAX_BODY_BYTES = 1024
 # Serialising the complete fixture run keeps every request and its temporary ledger
 # isolated. The adapter does not call the engine's legacy chart builder.
 SIMULATION_LOCK = threading.Lock()
+OPTIMIZER_LOCK = threading.Lock()
+OPTIMIZER_RUNTIME: Any | None = None
+OPTIMIZER_RUNTIME_ERROR: str | None = None
+
+
+def _durable_optimizer_requested(strategy_config_path: Path | None = None) -> bool:
+    """An injected strategy path is an isolated test/dev mode, never production DB."""
+    return strategy_config_path is None and bool(os.environ.get("DATABASE_URL"))
+
+
+def _runtime_for_payload(strategy_config_path: Path | None = None) -> Any | None:
+    """Resolve durable runtime only for the process-default strategy path.
+
+    Tests inject a temporary strategy file while DATABASE_URL can still be set by
+    the hosting environment. This guard keeps every adapter payload on that path
+    from even attempting an optimizer database lookup.
+    """
+    if strategy_config_path is not None:
+        return None
+    return optimizer_runtime() if _durable_optimizer_requested() else None
+
+
+def optimizer_runtime() -> Any | None:
+    """Construct the durable runtime once; never turn a DB outage into fixture data."""
+    global OPTIMIZER_RUNTIME, OPTIMIZER_RUNTIME_ERROR
+    if not _durable_optimizer_requested():
+        return None
+    with OPTIMIZER_LOCK:
+        if OPTIMIZER_RUNTIME is not None or OPTIMIZER_RUNTIME_ERROR is not None:
+            return OPTIMIZER_RUNTIME
+        try:
+            _add_engine_to_path()
+            from src.optimizer.runtime import OptimizerRuntime  # type: ignore
+
+            OPTIMIZER_RUNTIME = OptimizerRuntime.from_env()
+        except Exception as exc:
+            OPTIMIZER_RUNTIME_ERROR = f"{type(exc).__name__}: {str(exc)[:180]}"
+        return OPTIMIZER_RUNTIME
+
+
+def optimizer_status_payload(strategy_config_path: Path | None = None) -> dict[str, Any]:
+    """Return status even when the durable store is temporarily unavailable."""
+    _add_engine_to_path()
+    from src.optimizer.runtime import disabled_status  # type: ignore
+    from src.strategy_config import load_strategy_config  # type: ignore
+
+    runtime = _runtime_for_payload(strategy_config_path)
+    if runtime is not None:
+        try:
+            return runtime.status()
+        except Exception as exc:
+            document = load_strategy_config(strategy_config_path)
+            payload = disabled_status(document, error=f"optimizer database unavailable: {type(exc).__name__}: {str(exc)[:160]}")
+            payload["enabled"] = True
+            payload["runtime"] = "degraded"
+            return payload
+    if _durable_optimizer_requested(strategy_config_path) and OPTIMIZER_RUNTIME_ERROR:
+        payload = disabled_status(load_strategy_config(strategy_config_path), error=f"optimizer database unavailable: {OPTIMIZER_RUNTIME_ERROR}")
+        payload["enabled"] = True
+        payload["runtime"] = "degraded"
+        return payload
+    return disabled_status(load_strategy_config(strategy_config_path))
 
 
 class ApiError(Exception):
@@ -52,6 +114,11 @@ def _read_json(path: Path) -> Any:
 
 def snapshot_payload(*, simulation_available: bool = True, strategy_config_path: Path | None = None) -> dict[str, Any]:
     """Return the raw recorded datasets with the UI envelope required by the API."""
+    runtime = _runtime_for_payload(strategy_config_path)
+    if runtime is not None:
+        payload = runtime.snapshot_payload()
+        payload["strategyConfig"] = strategy_payload(strategy_config_path)
+        return payload
     board = _read_json(BOARD_PATH)
     trades = _read_json(TRADES_PATH)
     return {
@@ -76,8 +143,22 @@ def strategy_payload(strategy_config_path: Path | None = None) -> dict[str, Any]
     from src.live_feed import STRAT  # type: ignore
     from src.strategy_config import effective_strategy, load_strategy_config  # type: ignore
 
-    document = load_strategy_config(strategy_config_path)
-    strategy = effective_strategy(STRAT, strategy_config_path)
+    runtime = _runtime_for_payload(strategy_config_path)
+    if runtime is not None:
+        document = runtime.config()
+        strategy = dict(STRAT)
+        strategy.update(
+            max_open=document["max_open"],
+            watch_short_s=document["watchPeriods"]["short"],
+            watch_medium_s=document["watchPeriods"]["medium"],
+            watch_long_s=document["watchPeriods"]["long"],
+        )
+    elif _durable_optimizer_requested(strategy_config_path) and OPTIMIZER_RUNTIME_ERROR:
+        # A configured durable deployment must not silently serve the local file.
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, f"optimizer database unavailable: {OPTIMIZER_RUNTIME_ERROR}")
+    else:
+        document = load_strategy_config(strategy_config_path)
+        strategy = effective_strategy(STRAT, strategy_config_path)
     numeric_strategy = {
         name: value for name, value in strategy.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -358,11 +439,18 @@ def _parse_strategy_body(body: bytes) -> dict[str, Any]:
 def update_strategy_payload(update: dict[str, Any], strategy_config_path: Path | None = None) -> dict[str, Any]:
     """Persist only valid slider values, reporting stale UI writes as conflicts."""
     _add_engine_to_path()
+    from src.optimizer.store import RevisionConflict  # type: ignore
     from src.strategy_config import StrategyConfigError, StrategyRevisionConflict, update_strategy_config  # type: ignore
 
     try:
-        update_strategy_config(update, strategy_config_path)
-    except StrategyRevisionConflict as exc:
+        runtime = _runtime_for_payload(strategy_config_path)
+        if runtime is not None:
+            runtime.update_config(update)
+        elif _durable_optimizer_requested(strategy_config_path) and OPTIMIZER_RUNTIME_ERROR:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, f"optimizer database unavailable: {OPTIMIZER_RUNTIME_ERROR}")
+        else:
+            update_strategy_config(update, strategy_config_path)
+    except (StrategyRevisionConflict, RevisionConflict) as exc:
         raise ApiError(HTTPStatus.CONFLICT, str(exc)) from exc
     except StrategyConfigError as exc:
         raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
@@ -383,9 +471,15 @@ def dispatch(
     path = parsed.path
     if method == "GET" and path == "/api/snapshot":
         return HTTPStatus.OK, snapshot_payload(strategy_config_path=strategy_config_path)
+    if method == "GET" and path == "/api/optimizer":
+        return HTTPStatus.OK, optimizer_status_payload(strategy_config_path)
     if method == "GET" and path == "/api/strategy":
         return HTTPStatus.OK, strategy_payload(strategy_config_path)
     if method == "GET" and path == "/health":
+        if _durable_optimizer_requested(strategy_config_path):
+            # Liveness must not block behind market-data DB writes. Full worker
+            # readiness and data freshness remain available at /api/optimizer.
+            return HTTPStatus.OK, {"ok": True, "optimizer": "requested" if os.environ.get("PUMPMI_OPTIMIZER_ENABLED") == "1" else "disabled"}
         return HTTPStatus.OK, {"ok": True}
     if method == "POST" and path == "/api/simulate":
         _parse_simulate_body(body)
@@ -514,6 +608,16 @@ def main() -> None:
         port = int(os.environ.get("PORT", str(development_port())))
     except ValueError as exc:
         raise SystemExit("PORT must be an integer") from exc
+    worker = None
+    runtime = optimizer_runtime()
+    if runtime is not None and runtime.enabled:
+        from src.optimizer.runtime import Worker  # type: ignore
+
+        worker = Worker(runtime)
+        worker.start()
+        print(f"Pumpmi optimizer worker requested (boot={runtime.boot_id})", flush=True)
+    elif OPTIMIZER_RUNTIME_ERROR:
+        print(f"Pumpmi optimizer unavailable: {OPTIMIZER_RUNTIME_ERROR}", file=sys.stderr, flush=True)
     server = ThreadingHTTPServer((host, port), PumpmiHandler)
     print(f"Pumpmi adapter listening on http://{host}:{port}", flush=True)
     try:
@@ -522,6 +626,9 @@ def main() -> None:
         pass
     finally:
         server.server_close()
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=5)
 
 
 if __name__ == "__main__":

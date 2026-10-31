@@ -1,0 +1,319 @@
+"""Bounded public pump.fun data collection for the optimizer.
+
+There is intentionally no fixture fallback, no LunarCrush request without a key,
+and no use of the blocked pump.fun v2 API. Network errors are surfaced to the
+worker status rather than converted into market data.
+"""
+from __future__ import annotations
+
+import http.client
+import json
+import math
+import os
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+PUMP_FRONTEND_V3 = "https://frontend-api-v3.pump.fun"
+SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+USER_AGENT = {"User-Agent": "PumpmiOptimizer/1.0 paper-only", "Accept": "application/json"}
+
+
+class SourceError(RuntimeError):
+    """A source request failed; callers must keep this visible in health."""
+
+
+@dataclass
+class SourceBatch:
+    observations: list[dict[str, Any]]
+    source_name: str
+    social: str
+    error: str | None = None
+
+
+def _url_json(url: str, *, timeout: float = 4.0) -> Any:
+    request = urllib.request.Request(url, headers=USER_AGENT)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise SourceError(f"{type(exc).__name__}: {str(exc)[:160]}") from exc
+
+
+def _rpc_json(payload: dict[str, Any], *, timeout: float = 4.0) -> Any:
+    endpoint = os.environ.get("SOLANA_RPC_URL", "").strip() or SOLANA_RPC
+    if not endpoint.startswith("https://"):
+        raise SourceError("holder RPC endpoint must use HTTPS")
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={**USER_AGENT, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        raise SourceError(f"holder RPC HTTP {exc.code}; provider access/rate limit") from exc
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # A private provider may embed a key in its URL; do not echo exception text.
+        raise SourceError(f"holder RPC unavailable ({type(exc).__name__})") from exc
+
+
+def _rpc_value(payload: Any, method: str) -> Any:
+    """Validate a JSON-RPC success envelope before consuming its value."""
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        raise SourceError(f"holder {method} returned an invalid JSON-RPC envelope")
+    if payload.get("error") is not None:
+        error = payload.get("error")
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise SourceError(f"holder {method} RPC error: {str(message)[:120]}")
+    result = payload.get("result")
+    if not isinstance(result, dict) or "value" not in result:
+        raise SourceError(f"holder {method} returned no result value")
+    return result["value"]
+
+
+def _ui_amount(value: Any, label: str) -> float:
+    """Accept only finite non-negative RPC ``uiAmount`` values, never null-as-zero."""
+    if isinstance(value, bool):
+        raise SourceError(f"holder {label} uiAmount is invalid")
+    try:
+        amount = float(value)
+    except (TypeError, ValueError) as exc:
+        raise SourceError(f"holder {label} uiAmount is unavailable") from exc
+    if not math.isfinite(amount) or amount < 0:
+        raise SourceError(f"holder {label} uiAmount is invalid")
+    return amount
+
+
+def _known_curve_accounts(coin: dict[str, Any]) -> set[str]:
+    """Read real token-account addresses supplied by the public coin record.
+
+    The old "largest account is probably the curve" proxy could hide a holder.
+    Exclusion now requires a known bonding-curve token-account address that matches
+    the RPC response exactly; missing or mismatched metadata remains unknown.
+    """
+    addresses: set[str] = set()
+    for key in (
+        "associated_bonding_curve", "associatedBondingCurve", "curve_token_account",
+        "curveTokenAccount", "bonding_curve", "bondingCurve",
+    ):
+        value = coin.get(key)
+        if isinstance(value, str) and value.strip():
+            addresses.add(value.strip())
+    return addresses
+
+
+class HolderRiskCache:
+    """TTL/backoff holder checks; unknown values are never coerced to zero."""
+
+    def __init__(
+        self,
+        *,
+        rpc: Callable[[dict[str, Any]], Any] = _rpc_json,
+        ttl_seconds: float = 300.0,
+        failure_backoff_seconds: float = 60.0,
+    ) -> None:
+        self.rpc = rpc
+        self.ttl_seconds = ttl_seconds
+        self.failure_backoff_seconds = failure_backoff_seconds
+        self.cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self.backoff_until = 0.0
+
+    def get(self, coin: dict[str, Any], now: float) -> dict[str, Any]:
+        mint = str(coin.get("mint") or "").strip()
+        if not mint:
+            return {"status": "unknown", "reason": "token mint unavailable"}
+        cached = self.cache.get(mint)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+        if now < self.backoff_until:
+            return {"status": "unknown", "reason": "holder RPC backoff"}
+        try:
+            largest_value = _rpc_value(self.rpc({
+                "jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint],
+            }), "getTokenLargestAccounts")
+            if not isinstance(largest_value, list):
+                raise SourceError("holder getTokenLargestAccounts result value is not a list")
+            largest: list[tuple[str, float]] = []
+            for item in largest_value:
+                if not isinstance(item, dict) or not isinstance(item.get("address"), str) or not item["address"].strip():
+                    raise SourceError("holder getTokenLargestAccounts account shape is invalid")
+                largest.append((item["address"].strip(), _ui_amount(item.get("uiAmount"), "largest account")))
+
+            supply_value = _rpc_value(self.rpc({
+                "jsonrpc": "2.0", "id": 2, "method": "getTokenSupply", "params": [mint],
+            }), "getTokenSupply")
+            if not isinstance(supply_value, dict):
+                raise SourceError("holder getTokenSupply result value is not an object")
+            supply = _ui_amount(supply_value.get("uiAmount"), "token supply")
+            if supply <= 0:
+                raise SourceError("holder token supply is unavailable")
+
+            curve_accounts = _known_curve_accounts(coin)
+            if not curve_accounts:
+                raise SourceError("holder known curve account unavailable")
+            matching_curve = {address for address, _ in largest if address in curve_accounts}
+            if not matching_curve:
+                raise SourceError("holder known curve account was not present in largest accounts")
+            non_curve = [amount for address, amount in largest if address not in matching_curve]
+            top10 = 100.0 * sum(sorted(non_curve, reverse=True)[:10]) / supply
+            bundle = 100.0 * sum(sorted(non_curve, reverse=True)[:5]) / supply
+
+            creator = coin.get("creator")
+            if not isinstance(creator, str) or not creator.strip():
+                raise SourceError("holder creator unavailable")
+            owners_value = _rpc_value(self.rpc({
+                "jsonrpc": "2.0", "id": 3, "method": "getTokenAccountsByOwner",
+                "params": [creator.strip(), {"mint": mint}, {"encoding": "jsonParsed"}],
+            }), "getTokenAccountsByOwner")
+            if not isinstance(owners_value, list):
+                raise SourceError("holder getTokenAccountsByOwner result value is not a list")
+            dev_amount = 0.0
+            for item in owners_value:
+                if not isinstance(item, dict):
+                    raise SourceError("holder creator account shape is invalid")
+                account = item.get("account")
+                if not isinstance(account, dict):
+                    raise SourceError("holder creator account data is unavailable")
+                data = account.get("data")
+                if not isinstance(data, dict):
+                    raise SourceError("holder creator parsed data is unavailable")
+                parsed = data.get("parsed")
+                if not isinstance(parsed, dict):
+                    raise SourceError("holder creator parsed payload is unavailable")
+                info = parsed.get("info")
+                if not isinstance(info, dict):
+                    raise SourceError("holder creator token info is unavailable")
+                token_amount = info.get("tokenAmount")
+                if not isinstance(token_amount, dict):
+                    raise SourceError("holder creator token amount is unavailable")
+                dev_amount += _ui_amount(token_amount.get("uiAmount"), "creator account")
+            result = {
+                "status": "known",
+                "top10_pct": round(top10, 3),
+                "bundle_pct": round(bundle, 3),
+                "dev_pct": round(100.0 * dev_amount / supply, 3),
+                "reason": None,
+            }
+        except SourceError as exc:
+            self.backoff_until = now + self.failure_backoff_seconds
+            result = {"status": "unknown", "reason": str(exc)}
+        self.cache[mint] = (now + self.ttl_seconds, result)
+        return dict(result)
+
+
+class PumpFunSource:
+    """Collect at most one 30-row listing plus a bounded tracked-token refresh."""
+
+    name = "pump.fun frontend-api-v3"
+    social_label = "unavailable (no LunarCrush API key; no sentiment used)"
+
+    def __init__(
+        self,
+        *,
+        http_get: Callable[[str], Any] | None = None,
+        holder_cache: HolderRiskCache | None = None,
+        max_listing: int = 30,
+        max_tracked: int = 64,
+        max_tracked_refresh: int = 8,
+        max_holder_checks: int = 2,
+    ) -> None:
+        # At most 4s listing + 8×4s detail + 2×(3×4s) holder RPC = 60s, below
+        # the 75-second lease. The hard cap prevents a constructor override from
+        # turning bounded work into a rolling-deploy lease loss.
+        self.http_get = http_get or (lambda url: _url_json(url, timeout=4.0))
+        self.holder_cache = holder_cache or HolderRiskCache(rpc=lambda payload: _rpc_json(payload, timeout=4.0))
+        self.max_listing = min(30, max(1, max_listing))
+        self.max_tracked = min(64, max(1, max_tracked))
+        self.max_tracked_refresh = min(self.max_tracked, max(1, max_tracked_refresh))
+        self.max_holder_checks = min(2, max(1, max_holder_checks))
+        self._tracked_cursor = 0
+
+    @staticmethod
+    def _market_cap(coin: dict[str, Any]) -> float:
+        for key in ("usd_market_cap", "market_cap"):
+            try:
+                value = float(coin.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+        return 0.0
+
+    def _listing(self) -> list[dict[str, Any]]:
+        url = f"{PUMP_FRONTEND_V3}/coins?offset=0&limit={self.max_listing}&sort=last_trade_timestamp&order=DESC&includeNsfw=false"
+        payload = self.http_get(url)
+        if not isinstance(payload, list):
+            raise SourceError("frontend-api-v3 listing returned a non-list payload")
+        return [item for item in payload[: self.max_listing] if isinstance(item, dict) and item.get("mint")]
+
+    def _coin(self, mint: str) -> dict[str, Any]:
+        payload = self.http_get(f"{PUMP_FRONTEND_V3}/coins-v2/{mint}")
+        if not isinstance(payload, dict):
+            raise SourceError("frontend-api-v3 coin detail returned a non-object payload")
+        return payload
+
+    def collect(self, tracked_mints: list[str], *, now: float | None = None) -> SourceBatch:
+        now = time.time() if now is None else now
+        try:
+            listing = self._listing()
+            # Listing values are a legitimate live observation. Detail fetches are
+            # bounded and rotated across the durable 64-token state. This avoids
+            # turning a failed endpoint into an unbounded sequential network loop.
+            by_mint = {str(coin["mint"]): coin for coin in listing}
+            bounded_tracked = tracked_mints[: self.max_tracked]
+            if bounded_tracked:
+                start = self._tracked_cursor % len(bounded_tracked)
+                selected = (bounded_tracked[start:] + bounded_tracked[:start])[: self.max_tracked_refresh]
+                self._tracked_cursor = (start + len(selected)) % len(bounded_tracked)
+            else:
+                selected = []
+            for mint in selected:
+                try:
+                    detail = self._coin(mint)
+                except SourceError:
+                    # Do not make one stale token conceal a successful listing batch.
+                    continue
+                if detail.get("mint"):
+                    by_mint[str(detail["mint"])] = detail
+            observations: list[dict[str, Any]] = []
+            holder_checks = 0
+            for coin in list(by_mint.values())[: self.max_listing + self.max_tracked]:
+                market_cap = self._market_cap(coin)
+                if market_cap <= 0 or coin.get("complete"):
+                    continue
+                mint = str(coin["mint"])
+                cached = self.holder_cache.cache.get(mint)
+                if cached and cached[0] > now:
+                    risk = dict(cached[1])
+                elif holder_checks < self.max_holder_checks:
+                    holder_checks += 1
+                    risk = self.holder_cache.get(coin, now)
+                else:
+                    # This is deliberately not a zero concentration. The policy
+                    # records and conservatively skips it until a later poll checks it.
+                    risk = {"status": "unknown", "reason": "holder check budget; awaiting later poll"}
+                try:
+                    replies = int(coin.get("reply_count") or 0)
+                except (TypeError, ValueError):
+                    replies = 0
+                observations.append({
+                    "mint": mint,
+                    "symbol": str(coin.get("symbol") or "?")[:32],
+                    "name": str(coin.get("name") or "")[:120],
+                    "observed_at": now,
+                    "market_cap": round(market_cap, 6),
+                    "curve_pct": round(min(100.0, max(0.0, 100.0 * market_cap / 69000.0)), 4),
+                    "created_at": float(coin.get("created_timestamp") or 0) / 1000.0 if coin.get("created_timestamp") else None,
+                    "reply_count": replies,
+                    "risk": risk,
+                    "social": {"status": "unavailable", "sentiment": None, "source": "none"},
+                    "source": self.name,
+                })
+            return SourceBatch(observations=observations, source_name=self.name, social=self.social_label)
+        except SourceError as exc:
+            return SourceBatch(observations=[], source_name=self.name, social=self.social_label, error=str(exc))

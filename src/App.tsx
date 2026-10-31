@@ -43,6 +43,8 @@ import {
 } from "lucide-react";
 import TradeChart from "./components/TradeChart";
 import WatchControls from "./components/WatchControls";
+import OptimizerPanel from "./components/OptimizerPanel";
+import { useOptimizerStatus } from "./lib/optimizer";
 import TokenWatchPeriods from "./components/TokenWatchPeriods";
 import useStrategyConfig from "./lib/useStrategyConfig";
 import {
@@ -208,7 +210,13 @@ function EnergyPulse({ snapshot }: { snapshot: Snapshot }) {
         <strong>
           {snapshot.meta.kind === "fixture"
             ? "Fixture run complete"
-            : "Snapshot loaded"}
+            : snapshot.meta.kind === "live"
+              ? "Forward paper data"
+              : snapshot.meta.kind === "awaiting"
+                ? "Connecting to live market"
+                : snapshot.meta.kind === "stale"
+                  ? "Live source interrupted"
+                  : "Snapshot loaded"}
         </strong>
         <span>Paper mode</span>
       </div>
@@ -440,7 +448,7 @@ function Board({
                       token={t}
                       trade={snapshot.trades[t.symbol]}
                       onSelect={() => onSelect(t)}
-                      snapshotTs={snapshot.board.ts}
+                      snapshotTs={snapshot.board.ts ?? 0}
                       periods={periods}
                     />
                   ))
@@ -475,7 +483,11 @@ function Board({
                   <div className="scanner-line" />
                   <ScanLine size={20} />
                   <span>Listening for the next signal</span>
-                  <small>Snapshot monitoring · no live feed running</small>
+                  <small>
+                    {snapshot.meta.kind === "live"
+                      ? "Forward paper data · UI monitoring"
+                      : "Snapshot monitoring · no live feed running"}
+                  </small>
                 </div>
               )}
             </div>
@@ -566,7 +578,7 @@ function Detail({
         <TokenWatchPeriods
           token={token}
           periods={periods}
-          snapshotTs={snapshot.board.ts}
+          snapshotTs={snapshot.board.ts ?? 0}
           detailed
         />
       </div>
@@ -575,7 +587,7 @@ function Detail({
           RECORDED TRADE PATH{" "}
           <span>
             {trade
-              ? `${trade.dur} min · ${trade.metric === "unit_price" ? "fixture execution prices" : "interpolated ledger data"}`
+              ? `${trade.dur} min · ${trade.metric === "unit_price" ? "fixture execution prices" : snapshot.meta.kind === "live" ? "sampled market observations" : "interpolated ledger data"}`
               : "No completed trade chart"}
           </span>
         </div>
@@ -897,6 +909,7 @@ function Strategy({ config }: { config: StrategyConfig }) {
 }
 export default function App() {
   const watchSettings = useStrategyConfig();
+  const optimizer = useOptimizerStatus();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -921,6 +934,10 @@ export default function App() {
     undefined,
   );
   const queryRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (snapshot?.strategyConfig)
+      watchSettings.adoptConfig(snapshot.strategyConfig);
+  }, [snapshot?.strategyConfig?.revision]);
   function notify(message: string) {
     setToast(message);
     clearTimeout(toastTimer.current);
@@ -935,7 +952,16 @@ export default function App() {
       setChartSymbol((current) =>
         s.trades[current] ? current : Object.keys(s.trades)[0] || "",
       );
-      if (showFeedback) notify("Recorded engine snapshot refreshed.");
+      if (showFeedback)
+        notify(
+          s.meta.kind === "live"
+            ? "Forward paper market data refreshed."
+            : s.meta.kind === "awaiting"
+              ? "Waiting for verified live-market prices."
+              : s.meta.kind === "stale"
+                ? "Live market data is stale or interrupted."
+                : "Recorded engine snapshot refreshed.",
+        );
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Unable to load the engine snapshot.",
@@ -951,7 +977,10 @@ export default function App() {
   useEffect(() => {
     if (paused || snapshot?.meta.kind === "fixture") return;
     let active = true;
+    let pending = false;
     const interval = setInterval(() => {
+      if (pending) return;
+      pending = true;
       loadSnapshot()
         .then((next) => {
           if (!active) return;
@@ -963,6 +992,9 @@ export default function App() {
         .catch(() => {
           if (active)
             setError("Snapshot monitoring interrupted. Refresh to reconnect.");
+        })
+        .finally(() => {
+          pending = false;
         });
     }, 15000);
     return () => {
@@ -1305,13 +1337,21 @@ export default function App() {
                   <strong>
                     {snapshot.meta.kind === "fixture"
                       ? "FIXTURE SIMULATION"
-                      : "RECORDED SNAPSHOT"}
+                      : snapshot.meta.kind === "live"
+                        ? "FORWARD PAPER DATA"
+                        : snapshot.meta.kind === "awaiting"
+                          ? "CONNECTING LIVE MARKET"
+                          : snapshot.meta.kind === "stale"
+                            ? "LIVE FEED INTERRUPTED"
+                            : "RECORDED SNAPSHOT"}
                   </strong>
                   <span className="snapshot-divider" />
                   <span>
                     {snapshot.meta.kind === "fixture"
                       ? "Offline fixture data · original snapshot preserved"
-                      : `Market data captured ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}`}
+                      : board!.ts == null
+                        ? "Waiting for the first verified market observation"
+                        : `Market data captured ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}`}
                   </span>
                 </div>
                 <button
@@ -1323,7 +1363,7 @@ export default function App() {
                       notify(
                         paused
                           ? "Snapshot monitoring resumed."
-                          : "Snapshot monitoring paused.",
+                          : "UI monitoring paused. The paper worker continues independently.",
                       );
                     }
                   }}
@@ -1343,7 +1383,12 @@ export default function App() {
                   )}
                 </button>
               </div>
-              {view !== "journal" && <WatchControls {...watchSettings} />}
+              {view !== "journal" && (
+                <>
+                  <OptimizerPanel {...optimizer} />
+                  <WatchControls {...watchSettings} />
+                </>
+              )}
               {view === "terminal" && (
                 <>
                   <div className="monitor-grid">
@@ -1352,7 +1397,10 @@ export default function App() {
                         <span>
                           <ChartNoAxesCombined size={16} /> Trade spotlight{" "}
                           <span className="dim-label">
-                            / RECORDED EXECUTION
+                            /{" "}
+                            {snapshot.meta.kind === "live"
+                              ? "SAMPLED MARKET PATH"
+                              : "RECORDED EXECUTION"}
                           </span>
                         </span>
                         <button
@@ -1456,7 +1504,9 @@ export default function App() {
                           <span className="chart-data-note">
                             {trade?.metric === "unit_price"
                               ? "Fixture executions"
-                              : "Ledger interpolation"}
+                              : snapshot.meta.kind === "live"
+                                ? "Sampled market observations"
+                                : "Ledger interpolation"}
                           </span>
                         </div>
                         <button
