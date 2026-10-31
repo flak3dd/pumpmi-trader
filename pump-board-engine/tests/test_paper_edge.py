@@ -59,6 +59,7 @@ def _flow(buyers=16):
         "unique_buyers": buyers, "top_buyer_pct": 8.0, "top3_buyer_pct": 18.0,
         "meaningful_buyers": buyers, "trades": buyers + 2,
         "last_window_buyers": buyers, "last_window_top_pct": 12.0, "last_window_buy_sol": 0.8,
+        "last_window_signed_sol": 0.8, "last_window_imbalance": 4.0,
     }
 
 
@@ -99,6 +100,7 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["flow_strong_meaningful_buyers"] == 12
     assert STRAT["flow_last_window_min_buyers"] == 3
     assert STRAT["flow_last_window_max_whale_pct"] == 50
+    assert STRAT["flow_last_window_min_bs_ratio"] == 1.3
     assert STRAT["profit_lock_arm_pct"] == 8
     assert STRAT["profit_lock_giveback_pct"] == 6
     try:
@@ -367,3 +369,31 @@ def test_last_window_one_wallet_skips_before_a_paper_buy(tmp_path: Path) -> None
         })
         assert started == 1180.0
         assert Feed._last_window_start({"t": 1000.0, "watch_periods": {"medium": {"status": "watching", "elapsed_s": 0}}}) is None
+
+
+def test_last_window_net_sell_skips_before_a_paper_buy(tmp_path: Path) -> None:
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    # Breadth clears the older last-window caps. The window itself is net selling.
+    offered = dict(
+        _flow(16),
+        last_window_buyers=4, last_window_top_pct=25.0, last_window_buy_sol=0.6,
+        last_window_signed_sol=-0.6, last_window_imbalance=0.5,
+    )
+    coin = _coin(symbol="OFFER", mint="offer-mint-0001")
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(coin)):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since, _last=None: offered
+        _run_watch(feed, coin, now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("flow last window imbalance")
+        assert feed.ledger.fills == []

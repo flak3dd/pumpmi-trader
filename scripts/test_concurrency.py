@@ -129,19 +129,21 @@ class ConcurrencyTests(unittest.TestCase):
         self.assertEqual(self.a.get_state("source"), replacement, "new owner must invalidate and reload trading state")
 
     def test_six_position_cap_survives_restart_and_denies_seventh(self) -> None:
-        seven = [observation(f"MINT-{index}", 0) for index in range(7)]
-        self.ra.source = QueueSource([seven, seven])
+        # Four prints so each watch has three distinct rising curve-rate windows.
+        mints = [f"MINT-{index}" for index in range(7)]
+        steps = ((1, 25_000), (31, 25_400), (46, 26_000), (61, 26_800))
+        self.ra.source = QueueSource([[observation(mint, 0, mcap) for mint in mints] for _stamp, mcap in steps])
         self.own(self.ra, 0)
-        self.assertTrue(self.ra.tick(now=1))
-        self.assertTrue(self.ra.tick(now=62))
+        for stamp, _mcap in steps:
+            self.assertTrue(self.ra.tick(now=stamp))
         self.assertEqual(len(self.a.get_state("portfolio", fresh=True)["positions"]), MAX_OPEN)
 
         self.a.release_lease("optimizer-worker", "worker-a")
-        eighth = [observation("EIGHTH", 0)]
-        self.rb.source = QueueSource([eighth, eighth])
-        self.own(self.rb, 63)
-        self.assertTrue(self.rb.tick(now=63))
-        self.assertTrue(self.rb.tick(now=124))
+        later = ((200, 25_000), (230, 25_400), (245, 26_000), (260, 26_800))
+        self.rb.source = QueueSource([[observation("EIGHTH", 0, mcap)] for _stamp, mcap in later])
+        self.own(self.rb, 200)
+        for stamp, _mcap in later:
+            self.assertTrue(self.rb.tick(now=stamp))
         portfolio = self.b.get_state("portfolio", fresh=True)
         self.assertEqual(len(portfolio["positions"]), MAX_OPEN)
         self.assertIn("max 6 open positions", self.b.get_state("tracked", fresh=True)["EIGHTH"]["reason"])

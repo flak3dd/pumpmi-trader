@@ -14,6 +14,7 @@ v8 expected-edge revision (not a profitability claim):
   D2 fewer than 8 buyers of at least 0.05 SOL skip; the 70–85% curve band requires 12.
   Both distribution terms also scale size inside the same $130–160 band. Fees stay 100 bps.
   L5 the last watch window needs 3 buyers and no wallet above 50% of that window's buy SOL.
+  L6 that same window must itself clear the 1.3 buy/sell ratio. A net bid sizes slightly larger inside $130–160.
   M5 once net peaks at +8%, a 6-point giveback exits before the +25% scale. The scale still comes first.
 """
 import base64
@@ -49,7 +50,7 @@ STRAT = dict(
     flow_max_top3_pct=45, flow_meaningful_sol=0.05, flow_min_meaningful_buyers=8,
     flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
-    flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50,
+    flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50, flow_last_window_min_bs_ratio=1.3,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,

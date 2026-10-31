@@ -43,6 +43,19 @@ def document(revision: int = 5) -> dict:
     return {"version": 1, "revision": revision, "watchPeriods": {"short": 30, "medium": 45, "long": 60}, "max_open": 6}
 
 
+def _watch_through(rows: list[dict]) -> dict:
+    """Record every sample after the first onto a 30/180/1065 watch. Paper only."""
+    first = rows[0]
+    watch = make_watch_state(
+        {"short": 30, "medium": 180, "long": 1065},
+        started_at=float(first["observed_at"]),
+        start_curve=float(first["curve_pct"]),
+    )
+    for item in rows[1:]:
+        record_watch_observation(watch, item)
+    return watch
+
+
 def known_observation(mint: str, timestamp: float, mcap: float, *, symbol: str | None = None) -> dict:
     return {
         "mint": mint, "symbol": symbol or mint[:8], "name": f"Mock {mint[:8]}", "observed_at": timestamp,
@@ -125,8 +138,10 @@ class OptimizerTests(unittest.TestCase):
     def test_replay_excludes_future_exit_from_training_cutoff(self) -> None:
         observations = [
             known_observation("PATH", 0, 30_000),
-            known_observation("PATH", 60, 31_000),
-            known_observation("PATH", 2401, 31_000),  # hard exit only after cutoff
+            known_observation("PATH", 30, 30_400),
+            known_observation("PATH", 45, 31_000),
+            known_observation("PATH", 60, 31_800),
+            known_observation("PATH", 2401, 31_800),  # soft exit only after cutoff
         ]
         before = replay(observations, document()["watchPeriods"], cutoff=60)
         after = replay(observations, document()["watchPeriods"])
@@ -159,12 +174,19 @@ class OptimizerTests(unittest.TestCase):
             base = float(index * 3000)
             mint = f"P{index}"
             final = 20_000 if index == 100 else 30_000
-            observations.extend([
-                known_observation(mint, base, 25_000),
-                known_observation(mint, base + 60, 26_000),
-                known_observation(mint, base + 75, 25_500),
-                known_observation(mint, base + 2476, final),
-            ])
+            # Curve points per second rise through both the 60s and 75s long windows.
+            # The longer watch still enters at the cheaper 25_500 print.
+            for offset, mcap, curve in (
+                (0, 25_000, 36.00),
+                (30, 25_200, 36.30),
+                (45, 25_400, 36.60),
+                (60, 26_000, 37.00),
+                (75, 25_500, 37.50),
+                (2476, final, 40.00),
+            ):
+                item = known_observation(mint, base + offset, mcap)
+                item["curve_pct"] = curve
+                observations.append(item)
         self.store.record_observations(observations)
         now = 302_500.0
         self.store.set_many_state({
@@ -322,7 +344,8 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(set(checkpoints), {"short", "medium", "long"})
         self.assertTrue(all(item["status"] == "observed" for item in checkpoints.values()))
         self.assertEqual({item["sampled_at"] for item in checkpoints.values()}, {75.0})
-        self.assertIsNone(watch_entry_reason(observed, watch), "one-point long rise satisfies original flow fallback")
+        # One late print still fills every tier with the same timestamp. It is not three windows.
+        self.assertIn("one sample", watch_entry_reason(observed, watch) or "")
 
         no_sample = make_watch_state({"short": 30, "medium": 45, "long": 60}, started_at=0, start_curve=40.0)
         expired = watch_checkpoint_state(no_sample, as_of=75)
@@ -341,7 +364,15 @@ class OptimizerTests(unittest.TestCase):
         flat = known_observation("FLAT", 60, 27_600)  # curve exactly 40
         flat["reply_count"] = 0
         record_watch_observation(flat_watch, flat)
-        self.assertIn("flow check 2/3", watch_entry_reason(flat, flat_watch) or "")
+        self.assertIn("one sample", watch_entry_reason(flat, flat_watch) or "")
+        # Three rising rates with a sub-point total and no replies still hit the older reply gate.
+        paced = make_watch_state({"short": 30, "medium": 45, "long": 60}, started_at=0, start_curve=40.0)
+        for stamp, mcap in ((30, 27_634.5), (45, 27_738.0), (60, 27_945.0)):
+            sample = known_observation("PACE", stamp, mcap)
+            sample["curve_pct"] = 40.0 + (0.05 if stamp == 30 else 0.20 if stamp == 45 else 0.50)
+            sample["reply_count"] = 0
+            record_watch_observation(paced, sample)
+        self.assertIn("flow check 2/3", watch_entry_reason(sample, paced) or "")
         self.assertEqual(position_size(1500, losing_streak=0), 130.0)
         self.assertEqual(position_size(1500, losing_streak=3), 65.0)
 
@@ -393,6 +424,64 @@ class OptimizerTests(unittest.TestCase):
         self.assertGreater(float((locked or {}).get("net") or 0), 0)
         # The same path used to ride 30k -> 36k -> 33k -> 24k into a -20% stop, net about -30.68.
         self.assertGreater(float(locked["net"]), -30.68)
+
+    def test_dying_curve_rate_and_one_sample_do_not_buy_the_stop(self) -> None:
+        """Saved 30/180/1065 watches. Cumulative points rise; points per second do not.
+
+        Before this gate the same -20% path entered and stopped at net -30.68.
+        An accelerating path that hard-exits +10% still closes at net +7.54.
+        """
+        periods = {"short": 30, "medium": 180, "long": 1065}
+
+        def row(mint: str, stamp: float, mcap: float, curve: float, replies: int = 0) -> dict:
+            item = known_observation(mint, stamp, mcap)
+            item["curve_pct"] = curve
+            item["reply_count"] = replies
+            return item
+
+        fade = [
+            row("FADE", 0, 30_000, 40.0),
+            row("FADE", 30, 32_000, 42.0),
+            row("FADE", 180, 32_500, 42.4),
+            row("FADE", 1065, 32_800, 42.8),
+            row("FADE", 1200, 26_240, 42.0),
+        ]
+        faded = replay(fade, periods)
+        self.assertEqual(faded["metrics"]["closed_trades"], 0)
+        self.assertEqual(faded["metrics"]["net"], 0)
+        self.assertIn("not accelerating", watch_entry_reason(fade[3], _watch_through(fade)) or "")
+        portfolio = initial_portfolio()
+        opened = open_position(portfolio, fade[3], strategy_revision=0)
+        self.assertIsNotNone(opened)
+        assert opened is not None
+        stopped = apply_observation(portfolio, opened["id"], fade[4])
+        self.assertIsNotNone(stopped)
+        assert stopped is not None
+        self.assertAlmostEqual(float(stopped["net"]), -30.68, places=2)
+        self.assertAlmostEqual(float(stopped["gross"]), -26.0, places=2)
+        self.assertAlmostEqual(float(stopped["costs"]), 4.68, places=2)
+
+        one = [
+            row("ONE", 0, 30_000, 40.0),
+            row("ONE", 1065, 33_000, 43.0),
+            row("ONE", 1200, 26_400, 43.0),
+        ]
+        skipped = replay(one, periods)
+        self.assertEqual(skipped["metrics"]["closed_trades"], 0)
+        self.assertEqual(skipped["metrics"]["net"], 0)
+        self.assertIn("one sample", watch_entry_reason(one[1], _watch_through(one[:2])) or "")
+
+        good = [
+            row("GOOD", 0, 28_000, 40.0, replies=2),
+            row("GOOD", 30, 28_400, 40.30, replies=2),
+            row("GOOD", 180, 30_000, 43.30, replies=2),
+            row("GOOD", 1065, 30_000, 63.30, replies=2),
+            row("GOOD", 3465, 33_000, 64.0, replies=2),
+        ]
+        kept = replay(good, periods)
+        self.assertEqual(kept["metrics"]["closed_trades"], 1)
+        self.assertAlmostEqual(kept["metrics"]["net"], 7.54, places=2)
+        self.assertIsNone(watch_entry_reason(good[3], _watch_through(good[:4])))
 
     def test_chronological_split_never_divides_same_timestamp_cohort(self) -> None:
         observations: list[dict] = []
@@ -448,18 +537,22 @@ class OptimizerTests(unittest.TestCase):
 
     def test_snapshot_stats_trade_chart_and_watch_metadata_use_actual_values(self) -> None:
         # Two duplicate symbols prove card/chart trade keys remain mint-specific.
-        source = MockSource([
-            [known_observation("MINT-A", 0, 25_000, symbol="DUP"), known_observation("MINT-B", 0, 25_000, symbol="DUP")],
-            [known_observation("MINT-A", 0, 30_000, symbol="DUP"), known_observation("MINT-B", 0, 30_000, symbol="DUP")],
-            [known_observation("MINT-A", 0, 30_000, symbol="DUP"), known_observation("MINT-B", 0, 30_000, symbol="DUP")],
-        ])
+        # Samples at 1/31/46/61 are three distinct rising curve-rate windows, then a flat exit.
+        def pair(mcap: float) -> list[dict]:
+            return [
+                known_observation("MINT-A", 0, mcap, symbol="DUP"),
+                known_observation("MINT-B", 0, mcap, symbol="DUP"),
+            ]
+        source = MockSource([pair(25_000), pair(25_400), pair(26_000), pair(26_800), pair(26_800)])
         runtime = self.runtime(source)
         self.own_lease(runtime, 0)
         runtime.tick(now=1)
-        runtime.tick(now=62)
+        runtime.tick(now=31)
+        runtime.tick(now=46)
+        runtime.tick(now=61)
         # Model Worker.run acquiring a new cycle lease after the long time jump.
-        self.own_lease(runtime, 2463)
-        runtime.tick(now=2463)
+        self.own_lease(runtime, 2462)
+        runtime.tick(now=2462)
         payload = runtime.snapshot_payload()
         stats = payload["board"]["stats"]
         self.assertTrue({"ticks", "scanned", "buys", "wins", "losses", "skips", "realized"}.issubset(stats))
