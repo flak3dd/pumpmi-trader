@@ -36,7 +36,17 @@ class ApiContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory(prefix="pumpmi-api-strategy-")
         self.strategy_path = Path(self.temporary_directory.name) / "strategy.json"
-        self.strategy_path.write_bytes((ROOT / "pump-board-engine" / "strategy.json").read_bytes())
+        # The repo file may hold operator slider values. This contract checks the
+        # default document, not whatever watch durations were last saved locally.
+        self.strategy_path.write_text(
+            json.dumps({
+                "version": 1,
+                "revision": 0,
+                "max_open": 6,
+                "watchPeriods": {"short": 90, "medium": 180, "long": 300},
+            }),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
