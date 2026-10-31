@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.live_feed as live_feed
+from src.holders import account_ui_amount, concentration, largest_account_rows
 from src.live_feed import STRAT, Feed
 
 
@@ -213,6 +214,28 @@ def test_exits_emergency_vol_breakeven_and_flow_reversal(tmp_path: Path) -> None
         feed.apply_mark("VOL", {"spot": 93})
         assert "VOL" not in feed.pos
         assert feed.ledger.fills[-1][5].startswith("vol stop")
+
+        # Entry is marked 10% through the fee-only exit at the same spot, so net is
+        # −10% while spot has not moved. That used to lock the spread as a vol stop.
+        # $130 * (99 / 110 - 1) = −13.00. The position stays open. A later −4% spot
+        # print is still the quiet band and does exit.
+        plant("SPREAD")
+        feed.pos["SPREAD"]["entry"] = 110
+        feed.pos["SPREAD"]["entry_eff"] = 110
+        feed.pos["SPREAD"]["entry_spot"] = 100
+        feed.pos["SPREAD"]["peak"] = 100
+        feed.pos["SPREAD"]["last_spot"] = 100
+        feed.pos["SPREAD"]["rets"] = [0.001] * 6
+        feed.apply_mark("SPREAD", {"spot": 100})
+        assert "SPREAD" in feed.pos
+        assert [row for row in feed.ledger.fills if row[0] == "SPREAD"] == []
+        # Fee-only sell at the entry spot is 99 against an entry of 110, so $130 loses 13.
+        assert round(130 * (99 / 110 - 1), 6) == -13
+        feed.apply_mark("SPREAD", {"spot": 96})
+        assert "SPREAD" not in feed.pos
+        assert feed.ledger.fills[-1][0] == "SPREAD"
+        assert feed.ledger.fills[-1][5].startswith("vol stop")
+        assert feed.ledger.fills[-1][4] < -13.0
 
         plant("ARM")
         feed.apply_mark("ARM", {"spot": 120})
@@ -481,3 +504,64 @@ def test_depth_budget_cuts_a_boost_the_hard_drag_gate_still_allows(tmp_path: Pat
         assert full is not None and cut is not None
         assert STRAT["impact_max_drag_pct"] < full < STRAT["impact_size_budget_pct"]
         assert uncut * full / 100 < position["usd"] * cut / 100
+
+
+def test_whale_larger_than_the_curve_is_counted_and_skips(tmp_path: Path):
+    """Dropping the largest balance hides a 28% whale once the curve is only 20%.
+
+    The proxy then sees top-5 24% and top-10 25%, inside the 25% and 30% caps.
+    Excluding the known curve account leaves the whale in both, and the feed skips
+    before a paper buy. A missing curve address also skips. Neither path pays the
+    −15% net stop on $130, which is −19.50.
+    """
+    supply = 1000.0
+    accounts = [("whale", 280.0), ("curve", 200.0)] + [(f"w{i}", 10.0) for i in range(5)]
+    ranked = sorted((amount for _address, amount in accounts), reverse=True)
+    proxy_top5 = 100.0 * sum(ranked[1:6]) / supply
+    proxy_top10 = 100.0 * sum(ranked[1:11]) / supply
+    assert proxy_top5 <= STRAT["p0_bundle_max"]
+    assert proxy_top10 <= STRAT["p0_top10_max"]
+    stats = concentration(accounts, supply, {"curve"})
+    assert stats is not None
+    top1, top5, top10 = stats
+    assert top1 == 28.0
+    assert top5 > STRAT["p0_bundle_max"]
+    assert top10 > STRAT["p0_top10_max"]
+    assert concentration(accounts, supply, set()) is None
+    assert concentration(accounts, supply, {"missing"}) is None
+    assert account_ui_amount({"uiAmount": None, "uiAmountString": "280"}) == 280
+    assert account_ui_amount({"uiAmount": None}) is None
+    assert largest_account_rows([{"address": "curve", "uiAmount": None, "uiAmountString": "200"}]) == [("curve", 200.0)]
+
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    # 1e15 raw units at 6 decimals is 1e9 tokens. Whale 28%, curve 20%.
+    coin = _coin(
+        symbol="WHALE", mint="whale-hide-0001", total_supply=1_000_000_000_000_000, base_decimals=6,
+        associated_bonding_curve="curve-token",
+    )
+    rows = [
+        {"address": "whale", "uiAmount": 280_000_000},
+        {"address": "curve-token", "uiAmount": 200_000_000},
+        *[{"address": f"w{i}", "uiAmount": 10_000_000} for i in range(5)],
+    ]
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.curve_state = lambda _coin: _state(40.0, 5_000_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed._rpc = lambda method, params, timeout=20: {"result": {"value": rows}} if method == "getTokenLargestAccounts" else {}
+        feed.evaluate(coin)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("P0 top10")
+        assert feed.ledger.fills == []
+
+        hidden = _coin(symbol="NOCURVE", mint="nocurve-mint-0001", total_supply=1_000_000_000_000_000, base_decimals=6)
+        feed.evaluate(hidden)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("P0 holder data missing")
+        assert STRAT["size_min"] * -0.15 == -19.5

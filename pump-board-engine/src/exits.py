@@ -35,6 +35,30 @@ def profit_lock_hit(peak_net: float, net: float, arm_pct: float = 8.0, giveback_
     return float(net) <= floor + 1e-6
 
 
+def vol_stop_hit(entry_spot: float | None, spot: float | None, band: float, hard: float) -> bool:
+    """True when spot itself has reached a band that is tighter than the hard stop.
+
+    ``band`` comes from spot returns. Comparing it to fee-inclusive net treats the
+    entry fee and curve impact as a price drop, so an unchanged spot on a thin
+    book is already through the −4% floor. This check uses the spot move from
+    the entry spot. The hard net stop stays with the caller. A band that is not
+    tighter than ``hard`` does not fire here.
+    """
+    try:
+        entry = float(entry_spot) if entry_spot is not None else 0.0
+        mark = float(spot) if spot is not None else 0.0
+        band_pct = float(band)
+        hard_pct = float(hard)
+    except (TypeError, ValueError):
+        return False
+    if entry <= 0 or mark <= 0:
+        return False
+    if band_pct <= hard_pct + 1e-9:
+        return False
+    change = (mark / entry - 1.0) * 100.0
+    return change <= band_pct + 1e-6
+
+
 def vol_stop_pct(returns: list, strat: dict) -> float:
     """Negative percent. Sample-starved paths keep the hard stop. Otherwise clamp to [hard, floor].
 

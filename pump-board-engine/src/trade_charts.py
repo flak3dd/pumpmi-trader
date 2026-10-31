@@ -48,7 +48,7 @@ def rule_for(r):
     if r.startswith("emergency"): return "Emergency exit: spot dropped at least 10% in one check"
     if r.startswith("break-even"): return "Break-even stop after +15% net of paper fees"
     if r.startswith("profit lock"): return "Profit lock: pre-scale net gave back 6 points, exit above zero"
-    if r.startswith("vol stop"): return "Volatility stop: tighter than the hard −15% cap"
+    if r.startswith("vol stop"): return "Volatility stop: spot move hit the band before the −15% net stop"
     if r.startswith("flow exit"): return "Exit: post-entry net SOL flow reversed"
     if r.startswith("stop"): return "Hard stop: −15% net of paper fees"
     if r.startswith("time"): return "Time exit: soft 12m flat / hard 40m"
