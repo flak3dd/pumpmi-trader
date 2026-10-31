@@ -1,4 +1,4 @@
-"""v7 similarity gate (PAPER ONLY). Compares a sentiment-affirmed candidate to labeled historical paper EXITs
+"""Similarity gate (PAPER ONLY). Compares a sentiment-affirmed candidate to labeled historical paper EXITs
 in out/feature_history.jsonl and returns a decision: boost | skip | inconclusive | disagree.
 
 Feature vector FEAT_VERSION=2 (17 dims, order is stable; append-only for future versions):
@@ -9,13 +9,15 @@ Feature vector FEAT_VERSION=2 (17 dims, order is stable; append-only for future 
 13-16 missingness flags (1 if null): replies, top10, dev, bundle  -> nulls never silently look like zeros
 Scores: (a) weighted mean cosine to winners minus losers; (b) cosine kNN majority vote.
 Weights: (1+|pnl_pct|/25) * 0.5**(age_days/half_life), capped at w_cap per trade. Exits w/o sentiment ignored.
-Gate: need >=min_labeled exits AND >=min_each winners AND losers, else inconclusive (never 3x, never skip).
+Gate: need >=min_labeled exits AND >=min_each winners AND losers, else inconclusive (never boost, never skip).
+Judgment is prospective: only EXIT rows timestamped at or before ``now`` count, and a row that
+shares the candidate mint or key is ignored. Future outcomes cannot vote.
 """
 import json, math, time
 from pathlib import Path
 HIST = Path("out/feature_history.jsonl")
 FEAT_VERSION = 2
-SIM = dict(min_labeled=5, min_each=2, score_min=0.05, knn_k=5, half_life_days=7.0, w_cap=3.0)
+SIM = dict(min_labeled=30, min_each=2, score_min=0.05, knn_k=5, half_life_days=7.0, w_cap=3.0)
 
 def append(rec, path=None):
     p = Path(path or HIST); p.parent.mkdir(exist_ok=True)
@@ -50,11 +52,27 @@ def weight(r, now, C=SIM):
     age_d = max(0.0, (now - float(r.get("ts", now))) / 86400)
     return min(C["w_cap"], (1 + abs(r["pnl_pct"]) / 25) * 0.5 ** (age_d / C["half_life_days"]))
 
+def _prospective(row, cand, now):
+    """True when this labeled exit was already knowable at ``now`` and is not the candidate."""
+    if row.get("side") != "EXIT" or row.get("sentiment_0_100") is None or row.get("pnl_pct") is None:
+        return False
+    try:
+        ts = float(row.get("ts"))
+    except (TypeError, ValueError):
+        return False
+    if ts > now:
+        return False
+    if cand.get("mint") and row.get("mint") == cand.get("mint"):
+        return False
+    if cand.get("key") and row.get("key") == cand.get("key"):
+        return False
+    return True
+
 def decide(cand, hist=None, C=SIM, now=None):
-    """-> dict(decision, score, knn_win, knn_n, n_hist, nw, nl)."""
-    now = now or time.time()
-    hist = [r for r in (load() if hist is None else hist) if r.get("side") == "EXIT"
-            and r.get("sentiment_0_100") is not None and r.get("pnl_pct") is not None]
+    """-> dict(decision, score, knn_win, knn_n, n_hist, nw, nl). Prospective exits only."""
+    now = now if now is not None else time.time()
+    cand = cand or {}
+    hist = [r for r in (load() if hist is None else hist) if _prospective(r, cand, now)]
     win = [r for r in hist if r["pnl_pct"] > 0]; loss = [r for r in hist if r["pnl_pct"] <= 0]
     out = dict(decision="inconclusive", score=None, knn_win=0, knn_n=0, n_hist=len(hist), nw=len(win), nl=len(loss))
     if len(hist) < C["min_labeled"] or len(win) < C["min_each"] or len(loss) < C["min_each"]: return out

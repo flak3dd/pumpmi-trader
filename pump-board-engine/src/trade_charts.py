@@ -45,7 +45,11 @@ def gates_buy(r):
 def rule_for(r):
     if r.startswith("scale-out"): return "Scale-out: sell half at +25%+ target"
     if r.startswith("trail"): return "Trailing stop: gave back trail % from peak"
-    if r.startswith("stop"): return "Hard stop: −15% from entry"
+    if r.startswith("emergency"): return "Emergency exit: spot dropped at least 10% in one check"
+    if r.startswith("break-even"): return "Break-even stop after +15% net of paper fees"
+    if r.startswith("vol stop"): return "Volatility stop: tighter than the hard −15% cap"
+    if r.startswith("flow exit"): return "Exit: post-entry net SOL flow reversed"
+    if r.startswith("stop"): return "Hard stop: −15% net of paper fees"
     if r.startswith("time"): return "Time exit: soft 12m flat / hard 40m"
     if "curve" in r: return "Flatten near curve completion (≥95%)"
     return "Exit rule"

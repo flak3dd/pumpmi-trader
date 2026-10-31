@@ -5,13 +5,24 @@ L=dict(curve_pct=30,mcap=200000,replies=1,top10_pct=29,dev_pct=4,bundle_pct=24,r
 now=time.time()
 ex=lambda f,p,**k:{**f,**k,"side":"EXIT","pnl_pct":p,"ts":now}
 H=[ex(W,30),ex(W,25,replies=14),ex(W,40,curve_pct=62),ex(L,-18),ex(L,-20,mcap=190000),ex(L,-15,replies=2)]
+# Mechanism checks keep a small sample. Production SIM requires 30 prior exits.
+RELAX={**S.SIM,"min_labeled":5,"min_each":2}
 def test_inconclusive_thin(): assert S.decide(W,H[:4])["decision"]=="inconclusive"
 def test_inconclusive_one_side(): assert S.decide(W,[ex(W,10)]*5+[ex(L,-5)])["decision"]=="inconclusive"
-def test_boost(): assert S.decide(W,H)["decision"]=="boost"
-def test_skip(): assert S.decide(L,H)["decision"]=="skip"
+def test_boost(): assert S.decide(W,H,RELAX)["decision"]=="boost"
+def test_skip(): assert S.decide(L,H,RELAX)["decision"]=="skip"
 def test_disagree():
-    C={**S.SIM,"score_min":5}  # score can't reach -> kNN says win, score doesn't -> disagree
+    C={**RELAX,"score_min":5}  # score can't reach -> kNN says win, score doesn't -> disagree
     assert S.decide(W,H,C)["decision"]=="disagree"
+def test_default_requires_30_and_ignores_future_and_self():
+    assert S.SIM["min_labeled"]==30
+    assert S.decide(W,H)["decision"]=="inconclusive"
+    future=[{**r,"ts":now+10_000} for r in H]
+    assert S.decide(W,future,RELAX,now=now)["decision"]=="inconclusive"
+    self_rows=[{**r,"mint":"same","ts":now-5} for r in H]
+    assert S.decide({**W,"mint":"same"},self_rows,RELAX,now=now)["decision"]=="inconclusive"
+    prior=[{**r,"mint":"other","ts":now-5} for r in H]
+    assert S.decide({**W,"mint":"fresh"},prior,RELAX,now=now)["decision"]=="boost"
 def test_missing_flags(): assert S.vec({"replies":None})[13]==1 and S.vec({"replies":0})[13]==0
 def test_weight_cap_and_decay():
     assert S.weight({"pnl_pct":1000,"ts":now},now)==S.SIM["w_cap"]
