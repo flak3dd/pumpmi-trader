@@ -13,7 +13,8 @@ meaningful-buyer minimum of 0 disables that test. Neither gate changes fees.
 Acceleration compares SOL per second once window lengths are known, so a
 longer checkpoint cannot pass as rising flow. The last watch window is gated
 on its own: a whole-tape cap can pass while the window that triggers the
-entry is a single wallet.
+entry is a single wallet, or while that window itself is net selling. A
+last-window imbalance ratio of 0 disables only that bid test.
 """
 from __future__ import annotations
 
@@ -115,6 +116,8 @@ def with_last_window(summary: dict, trades: list, since_ts: float | None) -> dic
         summary["last_window_buyers"] = None
         summary["last_window_top_pct"] = None
         summary["last_window_buy_sol"] = None
+        summary["last_window_signed_sol"] = None
+        summary["last_window_imbalance"] = None
         return summary
     cutoff = float(since_ts)
     late = [trade for trade in trades if float(trade["ts"]) >= cutoff]
@@ -122,35 +125,51 @@ def with_last_window(summary: dict, trades: list, since_ts: float | None) -> dic
     summary["last_window_buyers"] = late_summary["unique_buyers"]
     summary["last_window_top_pct"] = late_summary["top_buyer_pct"]
     summary["last_window_buy_sol"] = late_summary["buy_sol"]
+    summary["last_window_signed_sol"] = late_summary["signed_quote_sol"]
+    summary["last_window_imbalance"] = late_summary["imbalance"]
     return summary
 
 
 def last_window_allows(summary: dict | None, strat: dict) -> tuple[bool, str]:
-    """The window that triggers the entry must itself be more than one wallet.
+    """The window that triggers the entry must itself be a distributed net bid.
 
     Whole-tape unique, top-buyer, and top-3 caps can all pass while the latest
-    window is a single buyer. That buyer is the paper entry's counterparty.
-    A buyer minimum of 0 and a top-buyer cap of 100 or more together disable
-    the test. Either control left on still fails closed when the fields are missing.
+    window is a single buyer, or while that window is net selling. That window
+    is the paper entry's counterparty. A buyer minimum of 0 and a top-buyer cap
+    of 100 or more disable the breadth test. An imbalance ratio of 0 disables
+    the bid test. Either control left on still fails closed when its fields are missing.
     """
     need = int(strat["flow_last_window_min_buyers"])
     cap = float(strat["flow_last_window_max_whale_pct"])
-    if need <= 0 and cap >= 100:
+    ratio = float(strat.get("flow_last_window_min_bs_ratio", strat["flow_min_bs_ratio"]))
+    buyers_off = need <= 0 and cap >= 100
+    imbalance_off = ratio <= 0
+    if buyers_off and imbalance_off:
         return True, "flow last window disabled"
     if not summary:
         return False, "flow last window unavailable"
     buyers = summary.get("last_window_buyers")
     top = summary.get("last_window_top_pct")
     buy_sol = summary.get("last_window_buy_sol")
-    if buyers is None or top is None or buy_sol is None:
+    signed = summary.get("last_window_signed_sol")
+    imbalance = summary.get("last_window_imbalance")
+    if not buyers_off and (buyers is None or top is None or buy_sol is None):
         return False, "flow last window unavailable"
-    if float(buy_sol) <= 0:
-        return False, "flow last window has no buys"
-    if int(buyers) < need:
-        return False, f"flow last window buyers {int(buyers)} < {need}"
-    if cap < 100 and float(top) > cap:
-        return False, f"flow last window top buyer {float(top):.0f}% > {cap:g}%"
-    return True, f"flow last window buyers {int(buyers)}, top {float(top):.0f}%"
+    if not imbalance_off and (signed is None or imbalance is None):
+        return False, "flow last window imbalance unavailable"
+    if not buyers_off:
+        if float(buy_sol) <= 0:
+            return False, "flow last window has no buys"
+        if int(buyers) < need:
+            return False, f"flow last window buyers {int(buyers)} < {need}"
+        if cap < 100 and float(top) > cap:
+            return False, f"flow last window top buyer {float(top):.0f}% > {cap:g}%"
+    if not imbalance_off and (float(signed) <= 0 or float(imbalance) < ratio):
+        return False, f"flow last window imbalance {float(imbalance):.2f} < {ratio:g}"
+    if buyers_off:
+        return True, f"flow last window imbalance {float(imbalance):.2f}"
+    bid = "" if imbalance is None else f", imbalance {float(imbalance):.2f}"
+    return True, f"flow last window buyers {int(buyers)}, top {float(top):.0f}%{bid}"
 
 
 def flow_allows(summary: dict | None, strat: dict, strong: bool = False) -> tuple[bool, str]:
@@ -233,7 +252,8 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
     """0 at the floor, 1 when breadth, imbalance, concentration, and acceleration are all clearly stronger.
 
     Top-3 slack, meaningful-buyer slack, and last-window slack participate with
-    the older four terms. Missing distribution fields contribute 0, so an
+    the older four terms. A measured last-window imbalance adds to that slack.
+    Missing distribution fields contribute 0, so an
     unmeasured tape cannot size up. When window lengths are passed, the
     acceleration term is the SOL/s ratio, so a longer last window does not by
     itself take the high-size credit. The result is still clamped to 0..1 for
@@ -273,16 +293,25 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
         meaningful_score = max(0.0, (float(meaningful) - need_meaningful) / max(need_meaningful, 1.0))
     late_buyers = summary.get("last_window_buyers")
     late_top = summary.get("last_window_top_pct")
+    late_imbalance = summary.get("last_window_imbalance")
     need_late = int(strat.get("flow_last_window_min_buyers", 3))
     late_cap = float(strat.get("flow_last_window_max_whale_pct", 50))
+    late_ratio = float(strat.get("flow_last_window_min_bs_ratio", strat.get("flow_min_bs_ratio", 1.3)))
     if late_buyers is None or late_top is None:
         late_score = 0.0
-    elif need_late <= 0 and late_cap >= 100:
+    elif need_late <= 0 and late_cap >= 100 and (late_imbalance is None or late_ratio <= 0):
         late_score = 1.0
     else:
         buyer_score = 1.0 if need_late <= 0 else max(0.0, (float(late_buyers) - need_late) / max(need_late, 1))
         whale_score = 1.0 if late_cap >= 100 else max(0.0, (late_cap - float(late_top)) / max(late_cap, 1e-9))
-        late_score = (buyer_score + whale_score) / 2.0
+        parts_late = [buyer_score, whale_score]
+        # A missing bid does not dilute tapes recorded before this field existed.
+        if late_imbalance is not None:
+            if late_ratio <= 0:
+                parts_late.append(1.0)
+            else:
+                parts_late.append(max(0.0, (float(late_imbalance) - late_ratio) / max(late_ratio, 1e-9)))
+        late_score = sum(parts_late) / len(parts_late)
     parts = (
         min(buyers, 1), min(imbalance, 1), min(whale, 1), min(accel, 1),
         min(top3_score, 1), min(meaningful_score, 1), min(late_score, 1),

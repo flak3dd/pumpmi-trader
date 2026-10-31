@@ -1,3 +1,6 @@
+import pytest
+
+from src.curve import buy_fill, sell_eff
 from src.flow import (
     accelerating,
     flow_allows,
@@ -206,7 +209,10 @@ def test_last_window_rejects_one_wallet_the_whole_tape_caps_allow():
     assert summary["last_window_top_pct"] == 100
     rejected, why = last_window_allows(summary, STRAT)
     assert not rejected and why.startswith("flow last window buyers")
-    whale_window = dict(summary, last_window_buyers=4, last_window_top_pct=80, last_window_buy_sol=1.0)
+    whale_window = dict(
+        summary, last_window_buyers=4, last_window_top_pct=80, last_window_buy_sol=1.0,
+        last_window_signed_sol=0.8, last_window_imbalance=2.0,
+    )
     rejected, why = last_window_allows(whale_window, STRAT)
     assert not rejected and "top buyer" in why
     loose = {**STRAT, "flow_last_window_min_buyers": 0, "flow_last_window_max_whale_pct": 100}
@@ -222,8 +228,14 @@ def test_broader_last_window_sizes_larger_without_leaving_the_band():
         unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
         meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
     )
-    broad = dict(base, last_window_buyers=9, last_window_top_pct=15, last_window_buy_sol=1.2)
-    thin = dict(base, last_window_buyers=3, last_window_top_pct=49, last_window_buy_sol=0.4)
+    broad = dict(
+        base, last_window_buyers=9, last_window_top_pct=15, last_window_buy_sol=1.2,
+        last_window_signed_sol=1.0, last_window_imbalance=2.6,
+    )
+    thin = dict(
+        base, last_window_buyers=3, last_window_top_pct=49, last_window_buy_sol=0.4,
+        last_window_signed_sol=0.3, last_window_imbalance=1.4,
+    )
     assert last_window_allows(broad, STRAT)[0]
     assert last_window_allows(thin, STRAT)[0]
     high = signal_strength(broad, slices, STRAT)
@@ -246,3 +258,58 @@ def test_longer_window_does_not_take_the_acceleration_size_credit():
     rising = [0.30, 3.0, 26.55]
     assert signal_strength(summary, rising, STRAT, durations=durations) > rated
     assert STRAT["size_min"] <= size_for_signal(rated, STRAT) <= size_for_signal(absolute, STRAT) <= STRAT["size_max"]
+
+
+def _distributed_then_sold_window():
+    """Whole tape clears the older caps. The entry window is four small bids into a larger sell."""
+    early = [{"side": "buy", "quote_sol": 0.2, "user": f"u{i}", "ts": 100} for i in range(16)]
+    early.append({"side": "sell", "quote_sol": 0.5, "user": "s", "ts": 110})
+    late = [{"side": "buy", "quote_sol": 0.15, "user": f"b{i}", "ts": 250} for i in range(4)]
+    late.append({"side": "sell", "quote_sol": 1.2, "user": "dumper", "ts": 260})
+    return with_last_window(summarize(early + late), early + late, 200)
+
+
+def test_last_window_net_sell_skips_a_tape_the_breadth_caps_allow():
+    summary = _distributed_then_sold_window()
+    assert flow_allows(summary, STRAT)[0]
+    assert summary["last_window_buyers"] == 4
+    assert summary["last_window_top_pct"] == 25
+    assert summary["last_window_signed_sol"] < 0
+    rejected, why = last_window_allows(summary, STRAT)
+    assert not rejected and why.startswith("flow last window imbalance")
+    # The same breadth with the sell removed is a net bid and still passes.
+    bids = [{"side": "buy", "quote_sol": 0.2, "user": f"u{i}", "ts": 100} for i in range(16)]
+    bids.append({"side": "sell", "quote_sol": 0.5, "user": "s", "ts": 110})
+    late = [{"side": "buy", "quote_sol": 0.2, "user": f"b{i}", "ts": 250} for i in range(4)]
+    healthy = with_last_window(summarize(bids + late), bids + late, 200)
+    assert last_window_allows(healthy, STRAT)[0]
+    disabled = {**STRAT, "flow_last_window_min_bs_ratio": 0}
+    assert last_window_allows(summary, disabled)[0]
+    assert last_window_allows(dict(healthy, last_window_signed_sol=None, last_window_imbalance=None), STRAT)[1] == (
+        "flow last window imbalance unavailable"
+    )
+    # $130 flat round trip on the feed's test curve. Taking the tape pays this; skipping pays 0.
+    spot, usd, sol_px = 30_000.0, STRAT["size_min"], 150.0
+    virtual_sol, virtual_token = 40_000_000_000, 1_000_000_000_000_000
+    filled = buy_fill(spot, usd, sol_px, virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+    flat = sell_eff(spot, filled["tokens"], virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+    flat_pnl = usd * flat / filled["entry_eff"] - usd
+    assert flat_pnl == pytest.approx(-7.828171445, abs=1e-6)
+    # An exact -15% net stop on the same $130 books -19.50. Skipping books 0.
+    assert usd * -0.15 == -19.5
+
+
+def test_stronger_last_window_bid_sizes_larger_without_leaving_the_band():
+    base = dict(
+        unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
+        meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
+        last_window_buyers=6, last_window_top_pct=20, last_window_buy_sol=0.8,
+    )
+    weak = dict(base, last_window_signed_sol=0.2, last_window_imbalance=1.3)
+    strong = dict(base, last_window_signed_sol=0.8, last_window_imbalance=2.6)
+    assert last_window_allows(weak, STRAT)[0]
+    assert last_window_allows(strong, STRAT)[0]
+    assert signal_strength(strong, [0.2, 0.4, 0.7], STRAT) > signal_strength(weak, [0.2, 0.4, 0.7], STRAT)
+    low = size_for_signal(signal_strength(weak, [0.2, 0.4, 0.7], STRAT), STRAT)
+    high = size_for_signal(signal_strength(strong, [0.2, 0.4, 0.7], STRAT), STRAT)
+    assert STRAT["size_min"] <= low <= high <= STRAT["size_max"]

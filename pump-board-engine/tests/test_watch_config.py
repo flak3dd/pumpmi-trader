@@ -128,6 +128,7 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
             "unique_buyers": 16, "top_buyer_pct": 10.0, "top3_buyer_pct": 22.0,
             "meaningful_buyers": 12, "trades": 20,
             "last_window_buyers": 6, "last_window_top_pct": 18.0, "last_window_buy_sol": 0.9,
+            "last_window_signed_sol": 0.5, "last_window_imbalance": 2.5,
         }
 
         feed.evaluate(coin)

@@ -19,6 +19,9 @@ SIDE_COST_RATE = (FEE_BPS + SLIPPAGE_BPS) / 10_000.0
 BANKROLL = 1500.0
 MAX_OPEN = 6
 WATCH_TIERS = ("short", "medium", "long")
+# Short-window curve points below this are dust. About 0.02 SOL on a typical curve,
+# above a 4-decimal reserve print. One sample that fills every tier is not three windows.
+CURVE_RATE_DUST_PTS = 0.05
 RISK_LIMITS = {
     "min_curve_pct": 25.0,
     "max_curve_pct": 85.0,
@@ -239,13 +242,52 @@ def watch_checkpoint_state(watch: dict[str, Any], *, as_of: float | None = None)
     return result
 
 
+def curve_rate_reason(checkpoints: dict[str, dict[str, Any]]) -> str | None:
+    """Three distinct checkpoint samples must show rising curve-points per second.
+
+    Cumulative points on 30s / 180s / 1065s almost always rise while the rate is
+    dying, and one late observation can fill every tier with the same print.
+    Both used to pass the reply-or-+1pt rule. Rates use the actual sample times,
+    so a longer nominal window cannot invent acceleration. This is an entry
+    filter for the paper book, not a profitability result.
+    """
+    points: list[tuple[float, float, float]] = []
+    for name in WATCH_TIERS:
+        item = checkpoints.get(name) or {}
+        sampled = _finite_number(item.get("sampled_at"))
+        elapsed = _finite_number(item.get("elapsed_s"))
+        delta = _finite_number(item.get("curve_delta"))
+        if sampled is None or elapsed is None or delta is None or item.get("status") != "observed":
+            return "flow rate: windows incomplete"
+        points.append((sampled, elapsed, delta))
+    if len({item[0] for item in points}) < 3 or not (points[0][0] < points[1][0] < points[2][0]):
+        return "flow rate: windows are one sample"
+    if not (points[0][1] < points[1][1] < points[2][1]):
+        return "flow rate: windows incomplete"
+    rates: list[float] = []
+    prev_elapsed = 0.0
+    prev_delta = 0.0
+    for _sampled, elapsed, delta in points:
+        span = elapsed - prev_elapsed
+        if span <= 0:
+            return "flow rate: windows incomplete"
+        rates.append((delta - prev_delta) / span)
+        prev_elapsed = elapsed
+        prev_delta = delta
+    short_pts = rates[0] * points[0][1]
+    if short_pts + 1e-9 < CURVE_RATE_DUST_PTS or rates[1] <= rates[0] or rates[2] <= rates[1]:
+        return f"flow rate: not accelerating {rates[0]:+.4f}/{rates[1]:+.4f}/{rates[2]:+.4f} pts/s"
+    return None
+
+
 def watch_entry_reason(observation: dict[str, Any], watch: dict[str, Any]) -> str | None:
     """Return a truthful watch/flow failure shared by forward and replay paths.
 
     Check 3 documents the three actual checkpoint rule: short and medium must be
-    non-negative, while long preserves the original no-decline condition. Check 2
-    preserves the original flow rule of at least two replies *or* a one-point long
-    curve rise. These requirements only add conservative filters.
+    non-negative, while long preserves the original no-decline condition. The
+    curve-rate check then requires three distinct samples with rising points per
+    second. Check 2 preserves the original flow rule of at least two replies *or*
+    a one-point long curve rise. These requirements only add conservative filters.
     """
     observed_at = _finite_number(observation.get("observed_at"))
     if observed_at is None:
@@ -262,6 +304,9 @@ def watch_entry_reason(observation: dict[str, Any], watch: dict[str, Any]) -> st
             return f"checkpoint check 3/3: {name} curve declined ({delta:.2f} points)"
         if name == "long" and delta < 0:
             return f"checkpoint check 3/3: long curve did not rise ({delta:.2f} points)"
+    rate_reason = curve_rate_reason(checkpoints)
+    if rate_reason is not None:
+        return rate_reason
     long_delta = float(checkpoints["long"]["curve_delta"])
     reply_count = _finite_number(observation.get("reply_count")) or 0.0
     if reply_count < 2.0 and long_delta < 1.0:
