@@ -27,6 +27,13 @@ from .policy import (
     watch_started_at,
 )
 from .replay import validate_candidates
+from .signals import (
+    build_signal_analysis,
+    empty_signal_analysis,
+    public_signal_analysis,
+    record_signal_event,
+    signal_events,
+)
 from .source import PumpFunSource
 from .store import DatabaseStore, LeaseLost, RevisionConflict, StoreUnavailable
 
@@ -166,6 +173,7 @@ class OptimizerRuntime:
             "board_stats": _empty_board_stats(),
             "validation": _empty_validation(),
             "events": [],
+            "signal_analysis": empty_signal_analysis(),
             "done_cards": [],
             "last_review_boundary": None,
             "last_validated_champion": champion,
@@ -329,6 +337,7 @@ class OptimizerRuntime:
         done: list[dict[str, Any]],
         stats: dict[str, Any],
         events: list[str],
+        signal_events_out: list[dict[str, Any]],
         *,
         now: float,
     ) -> None:
@@ -362,6 +371,16 @@ class OptimizerRuntime:
             stats["skips"] = int(stats.get("skips", 0)) + 1
             stats["expiredWatches"] = int(stats.get("expiredWatches", 0)) + 1
             events.append(f"{_now_iso(now)} SKIP {track.get('symbol', mint)} watch expired")
+            signal_events_out[:] = record_signal_event(
+                signal_events_out,
+                at=now,
+                mint=mint,
+                symbol=track.get("symbol"),
+                side="buy",
+                action="EXPIRE",
+                readiness_pct=None,
+                reason=track["reason"],
+            )
 
     def _entry_readiness(
         self,
@@ -424,6 +443,7 @@ class OptimizerRuntime:
     def status(self, *, now: float | None = None) -> dict[str, Any]:
         if not self.enabled:
             return disabled_status(self.config())
+        use_wall_clock = now is None
         now = time.time() if now is None else now
         source = self.store.get_state("source", _empty_source())
         # Entry readiness is factual, durable state rather than a five-second
@@ -432,6 +452,7 @@ class OptimizerRuntime:
         tracked = self.store.get_state("tracked", {}, fresh=True)
         stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
         validation = self.store.get_state("validation", _empty_validation())
+        signal_state = self.store.get_state("signal_analysis", empty_signal_analysis())
         health = self._health()
         document = self.config()
         runtime = health.get("runtime", "warming_up")
@@ -439,6 +460,13 @@ class OptimizerRuntime:
             runtime = "degraded"
             source = dict(source)
             source["error"] = self.local_error
+        hourly_reports = self.store.get_state("hourly_reports", [])
+        windows = self._windows(now)
+        reviews = self.store.reviews()
+        if use_wall_clock:
+            # Reads can wait for a worker commit with a quote newer than request
+            # start. Score freshness at response time, not before those reads.
+            now = time.time()
         return {
             "enabled": True,
             "runtime": runtime,
@@ -452,12 +480,13 @@ class OptimizerRuntime:
             "source": source,
             "champion": {"watchPeriods": dict(document["watchPeriods"]), "revision": int(document["revision"])},
             "portfolio": self._portfolio_status(portfolio),
-            "hourlyReports": self.store.get_state("hourly_reports", []),
+            "hourlyReports": hourly_reports,
             "costModel": {"feeBps": FEE_BPS, "slippageBps": SLIPPAGE_BPS, "label": "Model assumption: 100 bps fee + 100 bps slippage per side"},
-            "windows": self._windows(now),
+            "windows": windows,
             "validation": validation,
-            "reviews": self.store.reviews(),
+            "reviews": reviews,
             "entryReadiness": self._entry_readiness(tracked, portfolio, stats, now=now),
+            "signalAnalysis": public_signal_analysis(signal_state, now=now),
         }
 
     def _record_closed(self, trade: dict[str, Any], done: list[dict[str, Any]]) -> None:
@@ -558,6 +587,8 @@ class OptimizerRuntime:
                     source_status = _empty_source()
                 done = self.store.get_state("done_cards", [], fresh=True)
                 events = self.store.get_state("events", [], fresh=True)
+                signal_state = self.store.get_state("signal_analysis", empty_signal_analysis(), fresh=True)
+                structured_signal_events = signal_events(signal_state)
                 stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
                 if not isinstance(done, list):
                     done = []
@@ -569,13 +600,20 @@ class OptimizerRuntime:
                     stats.setdefault(key, value)
                 # Wall-clock expiry must run even when collection supplied no
                 # usable reserve quote or failed before it produced a batch.
-                self._expire_pending_watches(tracked, portfolio, done, stats, events, now=mutation_now)
+                self._expire_pending_watches(
+                    tracked, portfolio, done, stats, events, structured_signal_events, now=mutation_now,
+                )
                 if batch.error:
                     source_status.update({"name": batch.source_name, "error": batch.error, "social": batch.social, "trackedTokens": len(tracked)})
                     events.append(f"{_now_iso(mutation_now)} source failure: {batch.error}")
+                    signal_state = {
+                        **(signal_state if isinstance(signal_state, dict) else empty_signal_analysis()),
+                        "events": structured_signal_events[-120:],
+                    }
                     self.store.set_many_state({
                         "tracked": tracked, "portfolio": portfolio, "source": source_status,
                         "done_cards": done[-MAX_DONE_CARDS:], "events": events[-60:], "board_stats": stats,
+                        "signal_analysis": signal_state,
                     }, now=mutation_now)
                     self._set_health(runtime="degraded", now=mutation_now, error=batch.error)
                     return True
@@ -614,8 +652,28 @@ class OptimizerRuntime:
                         elif float(event["net"]) < 0:
                             stats["losses"] = int(stats["losses"]) + 1
                         events.append(f"{_now_iso(mutation_now)} EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(event["exit_at"]),
+                            mint=event["mint"],
+                            symbol=event["symbol"],
+                            side="sell",
+                            action="SELL",
+                            readiness_pct=100.0,
+                            reason=event["reason"],
+                        )
                     elif event and event["status"] == "scaled":
                         events.append(f"{_now_iso(mutation_now)} SCALE {position['symbol']} {event['reason']}")
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(event["at"]),
+                            mint=position.get("mint"),
+                            symbol=position.get("symbol"),
+                            side="sell",
+                            action="SCALE",
+                            readiness_pct=100.0,
+                            reason=event["reason"],
+                        )
 
                 for observation in accepted_observations:
                     mint = str(observation["mint"])
@@ -651,6 +709,16 @@ class OptimizerRuntime:
                         track["reason"] = "SKIP checkpoint state unavailable"
                         done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(observation["observed_at"]),
+                            mint=mint,
+                            symbol=track.get("symbol"),
+                            side="buy",
+                            action="SKIP",
+                            readiness_pct=None,
+                            reason=track["reason"],
+                        )
                         continue
                     if track.get("entry_decided"):
                         continue
@@ -665,6 +733,16 @@ class OptimizerRuntime:
                         done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
                         events.append(f"{_now_iso(mutation_now)} SKIP {track['symbol']} {reason}")
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(observation["observed_at"]),
+                            mint=mint,
+                            symbol=track.get("symbol"),
+                            side="buy",
+                            action="SKIP",
+                            readiness_pct=None,
+                            reason=reason,
+                        )
                         continue
                     position = open_position(portfolio, observation, strategy_revision=int(config["revision"]), watch=track)
                     if position is None:
@@ -672,10 +750,30 @@ class OptimizerRuntime:
                         done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
                         events.append(f"{_now_iso(mutation_now)} SKIP {track['symbol']} insufficient paper cash")
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(observation["observed_at"]),
+                            mint=mint,
+                            symbol=track.get("symbol"),
+                            side="buy",
+                            action="SKIP",
+                            readiness_pct=None,
+                            reason="insufficient paper cash",
+                        )
                     else:
                         track["reason"] = "entered after three actual immutable watch checkpoints; social unavailable and unused"
                         stats["buys"] = int(stats["buys"]) + 1
                         events.append(f"{_now_iso(mutation_now)} BUY {track['symbol']} ${position['initial_notional']:.2f} actual mcap ${position['entry_mcap']:,.0f}")
+                        structured_signal_events = record_signal_event(
+                            structured_signal_events,
+                            at=float(observation["observed_at"]),
+                            mint=mint,
+                            symbol=track.get("symbol"),
+                            side="buy",
+                            action="BUY",
+                            readiness_pct=100.0,
+                            reason="existing entry policy opened a paper position",
+                        )
 
                 self._trim_tracks(tracked, portfolio)
                 done = done[-MAX_DONE_CARDS:]
@@ -688,9 +786,19 @@ class OptimizerRuntime:
                     "error": None,
                     "observations": int(source_status.get("observations", 0)) + len(accepted_observations), "trackedTokens": len(tracked), "social": batch.social,
                 })
+                signal_state = build_signal_analysis(
+                    {**(signal_state if isinstance(signal_state, dict) else empty_signal_analysis()), "events": structured_signal_events},
+                    tracked=tracked,
+                    portfolio=portfolio,
+                    observations=accepted_observations,
+                    strategy_revision=int(config["revision"]),
+                    now=mutation_now,
+                    operational_mints=(str(item["mint"]) for item in accepted_observations),
+                )
                 self.store.set_many_state({
                     "tracked": tracked, "portfolio": portfolio, "source": source_status,
                     "done_cards": done, "events": events[-60:], "board_stats": stats,
+                    "signal_analysis": signal_state,
                 }, now=mutation_now)
                 self._run_rollback_if_needed(now=mutation_now, portfolio=portfolio)
                 self._set_health(runtime="running", now=mutation_now)

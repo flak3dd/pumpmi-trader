@@ -34,7 +34,7 @@ In a second terminal, run the real-data paper API on port 3001:
 PUMPMI_OPTIMIZER_ENABLED=1 pnpm dev:api
 ```
 
-Vite proxies the relative `/api` endpoints to the adapter. For production, the Dockerfile builds the frontend and enables the live paper worker on port 3000. `GET /health` is a cheap liveness check; `/api/optimizer` exposes actual worker ownership, source freshness/errors, and portfolio status.
+Vite proxies the relative `/api` endpoints to the adapter. For production, the Dockerfile builds the frontend and serves a live-data dashboard replica on port 3000 with `PUMPMI_WORKER_ENABLED=0`. The selected Cloud Computer runs the continuous worker under systemd with the worker flag enabled. `GET /health` is a cheap liveness check; `/api/optimizer` exposes actual worker ownership, source freshness/errors, and portfolio status.
 
 ## Three watch periods and six positions
 
@@ -62,7 +62,7 @@ Costs explicitly assume **1% fees plus 1% slippage per side**, not measured fill
 
 Hourly capability reports evaluate contiguous 3,600-second operation windows on the same portfolio. They record completed-trade gross/net results, modeled costs, equity, observed drawdown, fresh-source coverage, and strategy revisions. Long data gaps are insufficient evidence. A no-trade hour is not a win, and mixed strategy revisions are not a controlled enhancement comparison.
 
-The active ten-minute agent-led task now performs evidence-based strategy optimization, not a quota of two enhancements. It retains the incumbent when new real data and held-out improvement are insufficient. The app-native candidate review still runs every 30 minutes. Paid always-on hosting still requires its product confirmation; a current Preview worker is not a confirmed 24/7 deployment.
+The user stopped the ten-minute agent-led cycle; it remains paused. Application-native candidate review runs every 30 minutes on the systemd-hosted Cloud Computer worker and retains the incumbent when fresh chronological holdout evidence is insufficient. The managed HTTPS site is a reader, not the continuous worker. No additional Reserved hosting purchase is required for this selected existing VM; normal computer traffic/budget conditions apply.
 
 ## Validation and preserved archives
 
@@ -84,7 +84,7 @@ Reduced-motion preferences, keyboard navigation, inspection, live paper journal 
 
 ## Improvement-cycle Git discipline
 
-Each authorized cycle pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. The active ten-minute strategy task follows this integration order; it must report no change when evidence is insufficient.
+Each authorized change pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. The ten-minute strategy task remains paused; it is not restarted by a dashboard change.
 
 The managed dashboard is connected to the durable forward-paper optimizer. The separately available legacy `src.live_feed.Feed` implementation and its newly pulled v8 helper modules are preserved in this repository, but are a distinct runner. Active strategy telemetry reports the durable worker's actual limits rather than incorrectly advertising unused legacy thresholds. A future strategy integration must be validated against the active runner, not assumed from changes to another entry point.
 
@@ -122,8 +122,16 @@ Holder checks interleave listing and refreshed tracked candidates and prefer the
 
 The configured protected provider was tested without logging its URL/key: version and real reserve reads succeeded, but holder verification returned HTTP 403. Provider permission for `getTokenLargestAccounts` (and the subsequent supply/owner methods) must be enabled, or a compatible provider supplied, before those risk checks can qualify paper entries. No alternate route, unknown-as-safe value, fake fill, or risk relaxation is used to bypass that denial.
 
-Run `pnpm test:liveness` and `pnpm test:entry-status` for isolated expiry/scheduling and readiness-display regressions. On-demand hosting is not guaranteed continuous execution; the owner's Reserved/always-on product confirmation is still required before 24/7 residency can be claimed.
+Run `pnpm test:liveness` and `pnpm test:entry-status` for isolated expiry/scheduling and readiness-display regressions. The selected VM now runs the writer continuously with automatic service restart; the on-demand managed site reads its durable data. The replacement provider's holder method remains rate-limited (HTTP429), not proven fully operational.
 
 If the event transport repeatedly fails, the client falls back to one in-flight current-live JSON read every 15 seconds while EventSource retries. Repeated stream errors cannot continually cancel those reads; a valid event resumes streaming and stops polling. The status caption explicitly labels live polling. This is still fresh data from the running engine, never a stored snapshot or test fixture. Display pause/unmount cancel recovery.
 
 The browser-side live JSON request allowance is 35 seconds: a measured valid live response took about 21 seconds and was previously aborted by a 20-second limit. Polling still allows only one in-flight read, and failures remain explicit rather than reverting to archives.
+
+## Live signal reasoning and near-trigger percentages
+
+The dashboard's signal panel reads bounded, durable per-token diagnostics from the running worker. It ranks tokens approaching buy or sell conditions and displays actual measured values, required thresholds, missing-data blockers and timestamped operational reasons. Filter by near-buy/near-sell or show all actually screened tokens, expand gate facts, and inspect a matching token's live chart. The reason log distinguishes a diagnostic READY from an actual paper BUY, partial SCALE, full SELL or skipped/expired watch. Display pause freezes the log only, not the trader.
+
+**Buy readiness** is progress across the current strategy's required gates. **Sell proximity** is progress toward the nearest applicable exit trigger for an actual open position. These are deterministic heuristic scores, **not calibrated probabilities of buying, selling or profit**. A high score with a BLOCKED badge cannot justify a trade; unknown or stale data remain explicit, no open position means no sell candidate, and 100% readiness requires current data satisfying the authoritative policy. With no eligible/near candidates, the panel says so instead of fabricating percentages or trades.
+
+Signal diagnostics use existing observations and unchanged policy rules, no extra RPC requests. They persist inside the same lease-fenced transaction as the paper state, remain bounded/deduplicated across handoffs, and do not change user watch settings, bankroll, fees/slippage, risk filters or the six-position cap.

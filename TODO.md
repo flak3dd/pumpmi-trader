@@ -134,3 +134,10 @@ The managed website's production image now explicitly sets `PUMPMI_WORKER_ENABLE
 Native verification preserved revision 10, watch periods 90/210/705 seconds, $1,500 bankroll, zero positions and zero completed paper trades. The stopped 10-minute Manus optimization cycle remains paused. Application-native reviews remain separate.
 
 RPC verification on the server identifies PublicNode public RPC: `getVersion` succeeds, but `getTokenLargestAccounts` returns HTTP403. A protected authorized replacement endpoint is required; do not bypass denial or mark unknown holders safe. The earlier Reserved-hosting purchase is not needed for this selected existing server.
+
+## Live signal analysis and near-trigger percentages
+
+- [ ] Display a continuously refreshed, timestamped per-token operational decision log derived from actual market observations and paper engine decisions: watch/wait, blocked, ready, entry, partial exit, full exit and expiry/skip. Explain measured facts, required thresholds and concrete blockers; never fabricate reasoning, observations or paper actions.
+- [ ] Show ranked near-buy and near-sell tokens with traceable 0–100% gate-readiness/exit-proximity scores, expandable passed/failed/unknown/pending checks, exact quote time and token selection. Label these heuristic strategy-readiness scores, not calibrated probabilities of buying, selling or profit; show no sell score for a token without an open position. Empty or stale states remain explicit.
+- [ ] Keep diagnostics/log bounded and durable across worker handoffs, commit actual decision records with the existing lease-fenced transaction, and never change strategy, captured watch periods, gates, user revision, bankroll, six-position cap, RPC budgets or the paused cycle. New diagnostics must not mutate portfolio state or perform extra RPC calls.
+- [ ] Validate entry/exit gate consistency, unknown/stale data, near-trigger ranking, no fictitious sell/entry records, bounded deduplication, rollback/handoff behavior and UI interactions in isolated tests; integrate latest GitHub main again before push, deploy the VM/API and managed dashboard, and verify real live diagnostics.

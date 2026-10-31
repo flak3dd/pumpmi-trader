@@ -1,6 +1,54 @@
 import { useEffect, useState } from "react";
 import type { WatchPeriods } from "./data";
 
+export type SignalAnalysisGate = {
+  key: string;
+  label: string;
+  state: "pass" | "fail" | "unknown" | "pending";
+  actual: string;
+  required: string;
+  progressPct: number;
+};
+
+export type SignalAnalysisCandidate = {
+  mint: string;
+  symbol: string;
+  side: "buy" | "sell";
+  readinessPct: number | null;
+  status: "ready" | "approaching" | "blocked" | "waiting" | "stale";
+  observedAt: number | null;
+  reason: string;
+  gates: SignalAnalysisGate[];
+};
+
+export type SignalAnalysisEvent = {
+  id: string;
+  at: number;
+  mint: string;
+  symbol: string;
+  side: "buy" | "sell";
+  action:
+    | "WAIT"
+    | "BLOCK"
+    | "READY"
+    | "BUY"
+    | "SCALE"
+    | "SELL"
+    | "SKIP"
+    | "EXPIRE";
+  readinessPct: number | null;
+  reason: string;
+};
+
+export type SignalAnalysis = {
+  asOf: number | null;
+  model: "gate-readiness-v1";
+  calibrated: false;
+  disclaimer: string;
+  candidates: SignalAnalysisCandidate[];
+  events: SignalAnalysisEvent[];
+};
+
 export type OptimizerStatus = {
   enabled: boolean;
   runtime: "running" | "standby" | "degraded" | "warming_up" | "disabled";
@@ -19,6 +67,7 @@ export type OptimizerStatus = {
     expiredTotal: number;
     blocker: string | null;
   };
+  signalAnalysis?: SignalAnalysis;
   source: {
     name: string;
     lastObservation: number | null;
@@ -82,9 +131,24 @@ export function useOptimizerStatus() {
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
+    let inFlight = false;
+    let controller: AbortController | null = null;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const request = new AbortController();
+      controller = request;
+      let timedOut = false;
+      timeout = setTimeout(() => {
+        timedOut = true;
+        request.abort();
+      }, 45_000);
       try {
-        const r = await fetch("/api/optimizer", { cache: "no-store" });
+        const r = await fetch("/api/optimizer", {
+          cache: "no-store",
+          signal: request.signal,
+        });
         if (!r.ok)
           throw new Error(
             r.status === 404
@@ -97,10 +161,16 @@ export function useOptimizerStatus() {
           setError("");
         }
       } catch (e) {
-        if (active)
+        if (active && !request.signal.aborted)
           setError(
             e instanceof Error ? e.message : "Unable to reach the optimizer.",
           );
+        else if (active && timedOut)
+          setError("Optimizer telemetry request timed out after 45 seconds.");
+      } finally {
+        clearTimeout(timeout);
+        if (controller === request) controller = null;
+        inFlight = false;
       }
     };
     void load();
@@ -108,6 +178,8 @@ export function useOptimizerStatus() {
     return () => {
       active = false;
       clearInterval(interval);
+      clearTimeout(timeout);
+      controller?.abort();
     };
   }, []);
   return { status, error };

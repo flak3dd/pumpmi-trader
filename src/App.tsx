@@ -44,8 +44,13 @@ import {
 import TradeChart from "./components/TradeChart";
 import WatchControls from "./components/WatchControls";
 import OptimizerPanel from "./components/OptimizerPanel";
-import { useOptimizerStatus } from "./lib/optimizer";
+import SignalAnalysisPanel from "./components/SignalAnalysisPanel";
+import {
+  useOptimizerStatus,
+  type SignalAnalysisCandidate,
+} from "./lib/optimizer";
 import TokenWatchPeriods from "./components/TokenWatchPeriods";
+import { tokenBySignalMint } from "./lib/signalIdentity";
 import useStrategyConfig from "./lib/useStrategyConfig";
 import {
   allTokens,
@@ -1265,6 +1270,14 @@ export default function App() {
     setSelected(token);
     setChartSymbol(token.symbol);
   }
+  function boardTokenForCandidate(candidate: SignalAnalysisCandidate) {
+    if (!snapshot) return null;
+    return tokenBySignalMint(allTokens(snapshot), candidate);
+  }
+  function inspectCandidate(candidate: SignalAnalysisCandidate) {
+    const token = boardTokenForCandidate(candidate);
+    if (token) inspect(token);
+  }
   const board = snapshot?.board;
   const trade = snapshot?.trades[chartSymbol];
   const chartToken = useMemo(
@@ -1572,6 +1585,15 @@ export default function App() {
               {view !== "journal" && (
                 <>
                   <OptimizerPanel {...optimizer} />
+                  {view === "terminal" && (
+                    <SignalAnalysisPanel
+                      {...optimizer}
+                      canInspectCandidate={(candidate) =>
+                        Boolean(boardTokenForCandidate(candidate))
+                      }
+                      onSelectCandidate={inspectCandidate}
+                    />
+                  )}
                   <WatchControls {...watchSettings} />
                 </>
               )}
