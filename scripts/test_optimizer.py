@@ -22,11 +22,13 @@ if str(ENGINE_ROOT) not in sys.path:
 
 from src.optimizer.policy import (  # noqa: E402
     apply_observation,
+    exit_reason,
     initial_portfolio,
     make_watch_state,
     open_position,
     position_size,
     record_watch_observation,
+    risk_reason,
     watch_checkpoint_state,
     watch_entry_reason,
 )
@@ -464,6 +466,76 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(len(self.store.reviews()), 1)
         self.assertEqual(runtime.status(now=7210)["validation"]["state"], "waiting")
         self.assertEqual(runtime.config()["revision"], 5, "insufficient evidence must not promote")
+
+    def test_reserve_curve_replaces_the_usd_proxy_and_unknown_does_not_enter_or_flatten(self) -> None:
+        import base64
+        import struct
+
+        from src.curve import INITIAL_REAL_TOKEN_RESERVES
+
+        def account(sold_fraction: float) -> str:
+            real_token = int(INITIAL_REAL_TOKEN_RESERVES * (1.0 - sold_fraction))
+            blob = b"\x00" * 8 + struct.pack("<QQQQ", 1_073_000_000_000_000, 30_000_000_000, real_token, 1)
+            return base64.b64encode(blob).decode()
+
+        late = account(0.915)  # real ~91.5%. $25,402 / 69_000 is ~36.8% and used to pass.
+        mid = account(0.40)    # real ~40%. $10,000 / 69_000 is ~14.5% and used to fail.
+        coins = {
+            "LATE": {"mint": "LATE", "symbol": "LATE", "usd_market_cap": 25402, "bonding_curve": "curve-late", "reply_count": 4},
+            "MID": {"mint": "MID", "symbol": "MID", "usd_market_cap": 10000, "bonding_curve": "curve-mid", "reply_count": 4},
+            "MISS": {"mint": "MISS", "symbol": "MISS", "usd_market_cap": 30000, "bonding_curve": "curve-miss", "reply_count": 4},
+        }
+
+        class _Holders:
+            cache: dict = {}
+
+            def get(self, _coin, _now):
+                return {"status": "known", "top10_pct": 10.0, "dev_pct": 1.0, "bundle_pct": 10.0, "reason": None}
+
+        def rpc(payload):
+            self.assertEqual(payload["method"], "getMultipleAccounts")
+            blobs = {"curve-late": late, "curve-mid": mid}
+            values = []
+            for address in payload["params"][0]:
+                raw = blobs.get(address)
+                values.append({"data": [raw, "base64"]} if raw else None)
+            return {"jsonrpc": "2.0", "result": {"value": values}}
+
+        source = PumpFunSource(http_get=lambda _url: list(coins.values()), holder_cache=_Holders(), rpc=rpc)
+        batch = source.collect([], now=10)
+        self.assertIsNone(batch.error)
+        by_mint = {row["mint"]: row for row in batch.observations}
+        self.assertGreater(by_mint["LATE"]["curve_pct"], 90)
+        self.assertTrue(by_mint["LATE"]["curve_known"])
+        self.assertIn("curve outside", risk_reason(by_mint["LATE"]) or "")
+        self.assertAlmostEqual(by_mint["MID"]["curve_pct"], 40.0, delta=0.2)
+        self.assertIsNone(risk_reason(by_mint["MID"]))
+        # The old proxy would have rejected this $10k print (about 14%) and accepted the late one.
+        self.assertFalse(25 <= 100 * 10000 / 69000 <= 85)
+        self.assertTrue(25 <= 100 * 25402 / 69000 <= 85)
+        self.assertFalse(by_mint["MISS"]["curve_known"])
+        self.assertEqual(by_mint["MISS"]["curve_pct"], 0.0)
+        self.assertEqual(by_mint["MISS"]["market_cap"], 30000)
+        self.assertIn("reserves unavailable", risk_reason(by_mint["MISS"]) or "")
+
+        portfolio = initial_portfolio()
+        position = open_position(portfolio, known_observation("HELD", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(position)
+        assert position is not None
+        quiet = known_observation("HELD", 30, 30_000)
+        quiet["curve_pct"] = 0.0
+        quiet["curve_known"] = False
+        self.assertIsNone(exit_reason(position, quiet))
+        stopped = dict(quiet, market_cap=24_000, observed_at=60)
+        event = apply_observation(portfolio, position["id"], stopped)
+        self.assertEqual(event and event["status"], "closed")
+        self.assertIn("stop loss", event["reason"] if event else "")
+
+        runtime = self.runtime(MockSource([[quiet]]))
+        self.own_lease(runtime, 0)
+        runtime.tick(now=5)
+        self.assertEqual(self.store.get_state("tracked"), {})
+        self.assertEqual(runtime.status(now=5)["portfolio"]["openPositions"], 0)
 
 
 if __name__ == "__main__":

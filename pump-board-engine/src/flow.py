@@ -10,6 +10,8 @@ Top-3 share rejects a book that clears the single-wallet cap because two or
 three wallets still own the buy SOL. Meaningful buyers reject a unique count
 inflated by dust wallets. A top-3 cap of 100 or more disables that test. A
 meaningful-buyer minimum of 0 disables that test. Neither gate changes fees.
+Acceleration compares SOL per second once window lengths are known, so a
+longer checkpoint cannot pass as rising flow.
 """
 from __future__ import annotations
 
@@ -138,11 +140,25 @@ def flow_allows(summary: dict | None, strat: dict, strong: bool = False) -> tupl
     )
 
 
-def accelerating(slices: list | None, dust_sol: float) -> tuple[bool, str]:
-    """Three successive watch windows must each be positive and strictly larger than the previous."""
+def accelerating(slices: list | None, dust_sol: float, durations: list | None = None) -> tuple[bool, str]:
+    """Three successive watch windows must each show rising buy flow.
+
+    When ``durations`` is the length of each window in seconds, the test is
+    SOL per second. Absolute SOL on a 30s / 150s / 885s split almost always
+    rises while the rate is dying, and those entries are the ones this rejects.
+    Omitting durations keeps the absolute comparison for a caller that already
+    used equal windows.
+    """
     if not slices or len(slices) != 3 or any(item is None for item in slices):
         return False, "flow windows incomplete"
     short, medium, long = (float(item) for item in slices)
+    if durations is not None:
+        if len(durations) != 3 or any(item is None or float(item) <= 0 for item in durations):
+            return False, "flow windows incomplete"
+        rates = [sol / float(dur) for sol, dur in zip((short, medium, long), durations)]
+        if short < dust_sol or rates[1] <= rates[0] or rates[2] <= rates[1]:
+            return False, f"flow not accelerating {rates[0]:+.4f}/{rates[1]:+.4f}/{rates[2]:+.4f} SOL/s"
+        return True, f"flow accel {rates[0]:+.4f}/{rates[1]:+.4f}/{rates[2]:+.4f} SOL/s"
     if short < dust_sol or medium <= short or long <= medium:
         return False, f"flow not accelerating {short:+.3f}/{medium:+.3f}/{long:+.3f} SOL"
     return True, f"flow accel {short:+.3f}/{medium:+.3f}/{long:+.3f} SOL"
@@ -162,19 +178,31 @@ def flow_reversed(entry_lamports: int | None, now_lamports: int | None, entry_fl
     return net < -tolerance
 
 
-def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = False) -> float:
+def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = False,
+                    durations: list | None = None) -> float:
     """0 at the floor, 1 when breadth, imbalance, concentration, and acceleration are all clearly stronger.
 
     Top-3 slack and meaningful-buyer slack participate equally with the older four
     terms. Missing distribution fields contribute 0, so an unmeasured tape cannot
-    size up. The result is still clamped to 0..1 for ``size_for_signal``.
+    size up. When window lengths are passed, the acceleration term is the SOL/s
+    ratio, so a longer last window does not by itself take the high-size credit.
+    The result is still clamped to 0..1 for ``size_for_signal``.
     """
     need = strat["flow_strong_buyers"] if strong else strat["flow_min_buyers"]
     buyers = max(0.0, (summary["unique_buyers"] - need) / max(need, 1))
     imbalance = max(0.0, (summary["imbalance"] - strat["flow_min_bs_ratio"]) / max(strat["flow_min_bs_ratio"], 1e-9))
     whale = max(0.0, (strat["flow_max_whale_pct"] - summary["top_buyer_pct"]) / max(strat["flow_max_whale_pct"], 1e-9))
     accel = 0.0
-    if slices and slices[0] and slices[0] > 0:
+    rate_windows = (
+        isinstance(durations, (list, tuple)) and slices and len(durations) == len(slices) == 3
+        and all(isinstance(item, (int, float)) and float(item) > 0 for item in durations)
+    )
+    if rate_windows:
+        rate0 = float(slices[0]) / float(durations[0])
+        rate_n = float(slices[-1]) / float(durations[-1])
+        if rate0 > 0:
+            accel = max(0.0, rate_n / rate0 - 1.0)
+    elif slices and slices[0] and slices[0] > 0:
         accel = max(0.0, slices[-1] / slices[0] - 1.0)
     top3_cap = float(strat["flow_max_top3_pct"])
     top3 = summary.get("top3_buyer_pct")

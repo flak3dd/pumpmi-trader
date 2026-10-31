@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..curve import curve_progress_from_account_data
+
 
 PUMP_FRONTEND_V3 = "https://frontend-api-v3.pump.fun"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
@@ -62,17 +64,17 @@ def _rpc_json(payload: dict[str, Any], *, timeout: float = 4.0) -> Any:
         raise SourceError(f"holder RPC unavailable ({type(exc).__name__})") from exc
 
 
-def _rpc_value(payload: Any, method: str) -> Any:
+def _rpc_value(payload: Any, method: str, label: str = "holder") -> Any:
     """Validate a JSON-RPC success envelope before consuming its value."""
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
-        raise SourceError(f"holder {method} returned an invalid JSON-RPC envelope")
+        raise SourceError(f"{label} {method} returned an invalid JSON-RPC envelope")
     if payload.get("error") is not None:
         error = payload.get("error")
         message = error.get("message") if isinstance(error, dict) else str(error)
-        raise SourceError(f"holder {method} RPC error: {str(message)[:120]}")
+        raise SourceError(f"{label} {method} RPC error: {str(message)[:120]}")
     result = payload.get("result")
     if not isinstance(result, dict) or "value" not in result:
-        raise SourceError(f"holder {method} returned no result value")
+        raise SourceError(f"{label} {method} returned no result value")
     return result["value"]
 
 
@@ -217,15 +219,17 @@ class PumpFunSource:
         *,
         http_get: Callable[[str], Any] | None = None,
         holder_cache: HolderRiskCache | None = None,
+        rpc: Callable[[dict[str, Any]], Any] | None = None,
         max_listing: int = 30,
         max_tracked: int = 64,
         max_tracked_refresh: int = 8,
         max_holder_checks: int = 2,
     ) -> None:
-        # At most 4s listing + 8×4s detail + 2×(3×4s) holder RPC = 60s, below
-        # the 75-second lease. The hard cap prevents a constructor override from
-        # turning bounded work into a rolling-deploy lease loss.
+        # At most 4s listing + 4s curve batch + 8×4s detail + 2×(3×4s) holder
+        # RPC = 64s, below the 75-second lease. The hard cap prevents a
+        # constructor override from turning bounded work into a lease loss.
         self.http_get = http_get or (lambda url: _url_json(url, timeout=4.0))
+        self.rpc = rpc or (lambda payload: _rpc_json(payload, timeout=4.0))
         self.holder_cache = holder_cache or HolderRiskCache(rpc=lambda payload: _rpc_json(payload, timeout=4.0))
         self.max_listing = min(30, max(1, max_listing))
         self.max_tracked = min(64, max(1, max_tracked))
@@ -243,6 +247,47 @@ class PumpFunSource:
             if value > 0:
                 return value
         return 0.0
+
+    @staticmethod
+    def _curve_address(coin: dict[str, Any]) -> str:
+        for key in ("bonding_curve", "bondingCurve"):
+            value = coin.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _reserve_progress(self, coins: list[dict[str, Any]]) -> dict[str, float]:
+        """One getMultipleAccounts read of bonding-curve reserves.
+
+        An empty map means the read failed. Callers must not substitute
+        market-cap / 69_000. This is a paper label, not an order.
+        """
+        addresses: list[str] = []
+        for coin in coins:
+            address = self._curve_address(coin)
+            if address and address not in addresses:
+                addresses.append(address)
+        addresses = addresses[:100]
+        if not addresses:
+            return {}
+        try:
+            payload = self.rpc({
+                "jsonrpc": "2.0", "id": 1, "method": "getMultipleAccounts",
+                "params": [addresses, {"encoding": "base64", "commitment": "confirmed"}],
+            })
+            values = _rpc_value(payload, "getMultipleAccounts", label="curve")
+        except SourceError:
+            return {}
+        if not isinstance(values, list):
+            return {}
+        found: dict[str, float] = {}
+        for address, value in zip(addresses, values):
+            if not isinstance(value, dict):
+                continue
+            progress = curve_progress_from_account_data(value.get("data"))
+            if progress is not None:
+                found[address] = progress
+        return found
 
     def _listing(self) -> list[dict[str, Any]]:
         url = f"{PUMP_FRONTEND_V3}/coins?offset=0&limit={self.max_listing}&sort=last_trade_timestamp&order=DESC&includeNsfw=false"
@@ -280,6 +325,9 @@ class PumpFunSource:
                     continue
                 if detail.get("mint"):
                     by_mint[str(detail["mint"])] = detail
+            # Reserve progress for this poll. A failed batch leaves the map empty
+            # and every row curve_known false; prices are still recorded.
+            progress_by_curve = self._reserve_progress(list(by_mint.values()))
             observations: list[dict[str, Any]] = []
             holder_checks = 0
             for coin in list(by_mint.values())[: self.max_listing + self.max_tracked]:
@@ -301,13 +349,19 @@ class PumpFunSource:
                     replies = int(coin.get("reply_count") or 0)
                 except (TypeError, ValueError):
                     replies = 0
+                address = self._curve_address(coin)
+                progress = progress_by_curve.get(address)
+                known = progress is not None
                 observations.append({
                     "mint": mint,
                     "symbol": str(coin.get("symbol") or "?")[:32],
                     "name": str(coin.get("name") or "")[:120],
                     "observed_at": now,
                     "market_cap": round(market_cap, 6),
-                    "curve_pct": round(min(100.0, max(0.0, 100.0 * market_cap / 69000.0)), 4),
+                    # Unknown reserves stay numeric for the NOT NULL column and are
+                    # flagged so the 25–85% band cannot treat 0 as a real print.
+                    "curve_pct": round(float(progress), 4) if known else 0.0,
+                    "curve_known": known,
                     "created_at": float(coin.get("created_timestamp") or 0) / 1000.0 if coin.get("created_timestamp") else None,
                     "reply_count": replies,
                     "risk": risk,
