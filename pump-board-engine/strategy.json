@@ -1,0 +1,10 @@
+{
+  "max_open": 6,
+  "revision": 7,
+  "version": 1,
+  "watchPeriods": {
+    "long": 1065,
+    "medium": 180,
+    "short": 30
+  }
+}

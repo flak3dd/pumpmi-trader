@@ -3,6 +3,7 @@ Solana public RPC (top-holder concentration, best-effort), LunarCrush live socia
 import json, os, time, signal, traceback, urllib.request
 from pathlib import Path
 from .config import load
+from .strategy_config import effective_strategy
 from .aggregators.lunarcrush import LunarCrushClient, LunarCrushError
 from .aggregators.fuse import fuse, PLATFORMS
 from .ledger import Ledger
@@ -16,19 +17,19 @@ UA = {"User-Agent": "Mozilla/5.0 (PumpBoardEngine paper)", "Accept": "applicatio
 #  only trail relaxed (12->14.4%), stop stays -15% by choice. Prior v6 (2026-10-31): sentiment-affirmed buys pass a cosine-similarity gate vs historical paper exits
 #  (out/feature_history.jsonl); score<0 -> SKIP, else BUY 3x size + trail giveback x1.2 (12->14.4%) for that position.
 #  Thin history (<3 labeled w/ sentiment) -> inconclusive -> v5 buy. LC rate-limit/neutral -> v5 path, no boost.
-# was v5 (loosened: curve 25-85, watch 90-300s, rise>=0, rescan seen coins every 3m, LC 429 -> half size)
+# was v5 (loosened: curve 25-85, rise>=0, rescan seen coins every 3m, LC 429 -> half size)
 # was v4 (2026-10-31, research brief top 5). Paper only.
 #  P0 dump block: top10 (ex-curve) >30% OR dev(creator) >5% OR top-5 cluster (early-bundle proxy) >25%; nulls logged, never block alone
-#  P1 curve 35-80% & mcap cap, plus rising curve over ~3m watch (coin re-checked after >=150s; needs +rise_min_pts)
+#  P1 curve/mcap cap, then independently observe live curve deltas at short, medium, and long watch tiers before entry gates.
 #  P2 flow: unique buyers>=15/5m, buy/sell SOL>=1.3, top buyer<=20% vol when trade data exists; pump.fun trades API
 #     is unavailable (400/410) -> logged fallback: replies>=2 OR curve rising >= flow_fallback_rise_pts over the watch
 #  P3 social: LunarCrush sentiment if available; 429/backoff -> SKIP (no half-size); no topic -> neutral pass
 #  Exits: SL -15%, scale out half at +25% then trail 12% from peak, soft 12m if <+5%, hard 40m, flatten at curve>=95%
-#     or if creator token balance drops (dev sell). Size 1.5% equity clamp $130-160, max 3 open, halve after 3 straight losses.
+#     or if creator token balance drops (dev sell). Size 1.5% equity clamp $130-160, max 6 open, halve after 3 straight losses.
 STRAT = dict(min_curve_pct=25, max_curve_pct=85, max_mcap_usd=250_000, p0_top10_max=30, p0_dev_max=5, p0_bundle_max=25,
-             watch_s=90, watch_max_s=300, rise_min_pts=0.0, rescan_s=180, flow_min_buyers=15, flow_min_bs_ratio=1.3, flow_max_whale_pct=20,
+             watch_short_s=90, watch_medium_s=180, watch_long_s=300, rise_min_pts=0.0, rescan_s=180, flow_min_buyers=15, flow_min_bs_ratio=1.3, flow_max_whale_pct=20,
              p2_fallback_replies=2, flow_fallback_rise_pts=1, p3_min_sentiment=50, p3_min_mentions=100,
-             size_pct_equity=1.5, size_min=130, size_max=160, max_open=3, loss_streak_halve=3,
+             size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
              stop_loss_pct=-15, scale_out_pct=25, trail_giveback_pct=12, flat_exit_s=720, flat_exit_below_pct=5,
              hard_exit_s=2400, flatten_curve_pct=95, v6_size_mult=3, v6_trail_relax=1.20, v6_min_hist=5, v7_boost_eq_pct=8, v7_boost_usd_max=500)
 
@@ -45,13 +46,39 @@ def load_env(p=".env"):
                 if v.strip(): os.environ.setdefault(k.strip(), v.strip())
 
 class Feed:
-    def __init__(self, cfg):
+    def __init__(self, cfg, strategy_config_path=None):
         assert cfg["mode"] == "paper", "live feed is PAPER ONLY"
         self.cfg = cfg; self.bank = cfg["bankroll_usd"]; self.cash = self.bank
         self.pos = {}; self.seen = {}; self.board = Board(); self.log = []
         self.ledger = Ledger("out/ledger_live"); self.lc = LunarCrushClient()
         self.lc_backoff = 0; self.stats = dict(ticks=0, scanned=0, buys=0, wins=0, losses=0, skips=0, realized=0.0)
-        self.lc_cache = {}; self.traded = set(); self.watch = {}; self.loss_streak = 0; self.restore()
+        self.lc_cache = {}; self.traded = set(); self.watch = {}; self.loss_streak = 0
+        self.strategy_config_path = strategy_config_path; self.strategy = effective_strategy(STRAT, strategy_config_path)
+        self.restore()
+    def refresh_strategy(self):
+        """Read the local slider configuration once per tick for newly discovered coins."""
+        self.strategy = effective_strategy(STRAT, self.strategy_config_path)
+    def _new_watch_periods(self):
+        return {
+            "short": {"duration_s": self.strategy["watch_short_s"], "elapsed_s": 0, "status": "watching"},
+            "medium": {"duration_s": self.strategy["watch_medium_s"], "elapsed_s": 0, "status": "watching"},
+            "long": {"duration_s": self.strategy["watch_long_s"], "elapsed_s": 0, "status": "watching"},
+        }
+    @staticmethod
+    def _copy_watch_periods(watch_periods):
+        return {tier: dict(checkpoint) for tier, checkpoint in watch_periods.items()}
+    @staticmethod
+    def _watch_complete(w):
+        return all(checkpoint["status"] == "observed" for checkpoint in w["watch_periods"].values())
+    @staticmethod
+    def _watch_reason(w):
+        parts = []
+        for tier in ("short", "medium", "long"):
+            checkpoint = w["watch_periods"][tier]
+            label = f"{tier} {checkpoint['duration_s']}s {checkpoint['status']}"
+            if checkpoint["status"] == "observed": label += f" ({checkpoint['curve_delta']:+.1f}pts)"
+            parts.append(label)
+        return "watch tiers: " + "; ".join(parts)
     def restore(self):
         """Rebuild cash/realized/open positions from the live ledger so restarts keep stats continuous."""
         import csv
@@ -119,7 +146,7 @@ class Feed:
         except Exception: snap = None
         self.lc_cache[sym] = snap; return snap
     def evaluate(self, c, first=True):
-        sym = (c.get("symbol") or "?")[:10].upper(); mint = c["mint"]; key = f"{sym}·{mint[:4]}"; E = STRAT
+        sym = (c.get("symbol") or "?")[:10].upper(); mint = c["mint"]; key = f"{sym}·{mint[:4]}"; E = self.strategy
         if first: self.stats["scanned"] += 1
         mc = float(c.get("usd_market_cap") or 0); curve = min(100, round(100 * mc / 69000, 1))
         reps = c.get("reply_count", 0) or 0
@@ -131,8 +158,10 @@ class Feed:
         if reason: return self.skip(key, reason, forever, c)
         # P0 holder dump block
         top, bund, t10, sup = self.holders(c); dev = self.dev_pct(c, sup)
+        old_card = self.board.cards.get(key)
+        ts_seen = old_card["ts_seen"] if old_card and "ts_seen" in old_card else time.time()
         info = dict(mint=mint, name=c.get("name"), mcap=round(mc), curve_pct=curve, top1_pct=top, top10_pct=t10, dev_pct=dev,
-                    bundle_pct=bund, replies=reps, ts_seen=time.time())
+                    bundle_pct=bund, replies=reps, ts_seen=ts_seen)
         self.board.put(key, "checking", **info)
         nulls = [n for n, v in (("top10", t10), ("dev", dev), ("bundle", bund)) if v is None]
         if nulls: self.ev(f"P0 {key}: missing {','.join(nulls)} (not blocking on nulls)")
@@ -140,16 +169,26 @@ class Feed:
         elif dev is not None and dev > E["p0_dev_max"]: reason = f"P0 dev {dev}% > {E['p0_dev_max']}%"
         elif bund is not None and bund > E["p0_bundle_max"]: reason = f"P0 top-5 cluster {bund}% > {E['p0_bundle_max']}%"
         if reason: return self.skip(key, reason, False, c)
-        # P1 rising-curve watch (~3m)
+        # P1 rising-curve watch. Each token keeps its initial slider settings, so a
+        # later slider save cannot make an in-progress long observation complete early.
         w = self.watch.get(mint)
         if w is None:
-            self.watch[mint] = dict(t=time.time(), curve=curve, key=key)
-            self.board.put(key, "checking", reason=f"watching curve {curve}% for ~{E['watch_s']//60}m")
-            self.ev(f"WATCH {key} curve {curve}% (re-check in ~{E['watch_s']}s)"); return
+            periods = self._new_watch_periods(); started = time.time()
+            w = dict(t=started, curve=curve, baseline_curve=curve, key=key, watch_periods=periods)
+            self.watch[mint] = w
+            self.board.put(key, "checking", reason=self._watch_reason(w), watch_started_ts=started, watch_periods=self._copy_watch_periods(periods))
+            self.ev(f"WATCH {key} curve {curve}% ({self._watch_reason(w)})"); return
+        long_duration = w["watch_periods"]["long"]["duration_s"]
+        # A direct/repeated evaluate call must not bypass the long tier; only recheck
+        # records observations, and it does so from the fetched market payload.
+        if time.time() - w["t"] < long_duration or not self._watch_complete(w):
+            self.board.put(key, "checking", reason=self._watch_reason(w), watch_periods=self._copy_watch_periods(w["watch_periods"]))
+            return
         rise = curve - w["curve"]
         if rise < E["rise_min_pts"]: self.watch.pop(mint, None); return self.skip(key, f"P1 curve not rising over watch ({w['curve']}%->{curve}%)", False, c)
         # P2 flow (trade API unavailable -> logged fallback)
         flow = None  # pump.fun trades endpoint returns 400/410 for public clients; no per-trade data
+        p2 = False; p2why = "flow unavailable"
         if flow is None:
             p2 = reps >= E["p2_fallback_replies"] or rise >= E["flow_fallback_rise_pts"]
             p2why = f"flow n/a -> fallback ({reps} replies, curve +{rise:.1f}pts)"
@@ -172,14 +211,15 @@ class Feed:
         if usd < 20: return self.skip(key, "no cash", False, c)
         sentiment_buy = isinstance(snap, dict) and not half and snap["mention_volume"] >= E["p3_min_mentions"] \
             and snap["sentiment_0_100"] >= E["p3_min_sentiment"]
+        social_values = snap if isinstance(snap, dict) else {}
         feat = dict(key=key, mint=mint, curve_pct=curve, mcap=round(mc), replies=reps, top10_pct=t10, dev_pct=dev, bundle_pct=bund,
-                    rise_pts=round(rise, 2), sentiment_0_100=snap["sentiment_0_100"] if sentiment_buy else None,
-                    mention_volume=snap["mention_volume"] if sentiment_buy else None, sentiment_buy=sentiment_buy)
+                    rise_pts=round(rise, 2), sentiment_0_100=social_values.get("sentiment_0_100") if sentiment_buy else None,
+                    mention_volume=social_values.get("mention_volume") if sentiment_buy else None, sentiment_buy=sentiment_buy)
         boost = False; trail = E["trail_giveback_pct"]; v6why = ""
         feat["size_pct_equity"] = round(100 * usd / max(self.equity(), 1), 2)
         ct = c.get("created_timestamp"); feat["age_s"] = round(time.time() - ct / 1000) if ct else None
         if sentiment_buy:
-            d = SIM.decide(feat); dec = d["decision"]
+            d = SIM.decide(feat); dec = str(d["decision"])
             tag = f"score={d['score']} knn={d['knn_win']}/{d['knn_n']} n_hist={d['n_hist']} ({d['nw']}W/{d['nl']}L)"
             if dec == "skip": return self.skip(key, f"v7 SIM skip {tag}", False, c)
             if dec == "boost":
@@ -206,13 +246,25 @@ class Feed:
     def recheck(self):
         for mint, w in list(self.watch.items()):
             age = time.time() - w["t"]
-            if age < STRAT["watch_s"]: continue
-            if age > STRAT["watch_max_s"]: self.watch.pop(mint); self.ev(f"WATCH expired {w['key']}"); continue
+            periods = w["watch_periods"]
+            long_duration = periods["long"]["duration_s"]
+            if age > long_duration + 120:
+                self.watch.pop(mint); self.ev(f"WATCH expired {w['key']} after {age:.0f}s ({self._watch_reason(w)})"); continue
+            due = [tier for tier in ("short", "medium", "long")
+                   if periods[tier]["status"] == "watching" and age >= periods[tier]["duration_s"]]
+            if not due: continue
             try: c = http(f"{PF}/coins-v2/{mint}")
             except Exception as e: self.ev(f"recheck {w['key']} fetch failed {type(e).__name__}"); continue
-            self.ev(f"RECHECK {w['key']} after {age:.0f}s")
             if c.get("complete"): self.watch.pop(mint); continue
-            self.evaluate(c, first=False)
+            mc = float(c.get("usd_market_cap") or 0)
+            curve = min(100, round(100 * mc / 69000, 1))
+            for tier in due:
+                periods[tier].update(elapsed_s=round(max(0, age), 1), status="observed",
+                                     curve_delta=round(curve - w["baseline_curve"], 1))
+            self.board.put(w["key"], "checking", reason=self._watch_reason(w), watch_periods=self._copy_watch_periods(periods))
+            self.ev(f"RECHECK {w['key']} after {age:.0f}s observed {','.join(due)} ({self._watch_reason(w)})")
+            if self._watch_complete(w) and age >= long_duration:
+                self.evaluate(c, first=False)
     def close(self, key, mc, why, frac=1.0):
         p = self.pos[key]; part = p["usd"] * frac; val = part * mc / p["entry"]; pnl = val - part; self.cash += val
         self.stats["realized"] += pnl
@@ -228,7 +280,7 @@ class Feed:
         if frac >= 1: self.board.put(key, "done", verdict="EXIT", reason=why, pnl=round(pnl, 2), pnl_pct=round(100 * pnl / part, 1), mcap=round(mc))
         self.ev(f"EXIT {key} {why} pnl {pnl:+.2f}")
     def manage(self):
-        E = STRAT
+        E = self.strategy
         for k, p in list(self.pos.items()):
             try: mc = self.mcap(p["mint"])
             except Exception: continue
@@ -258,13 +310,14 @@ class Feed:
                   log=self.log, lunarcrush=self.lc.mode, updated=time.strftime("%Y-%m-%d %H:%M:%S %Z"))
         Path("out").mkdir(exist_ok=True); tmp = Path("out/board.json.tmp"); tmp.write_text(json.dumps(st, indent=1)); tmp.replace("out/board.json")
     def tick(self):
+        self.refresh_strategy()
         self.stats["ticks"] += 1
         coins = http(f"{PF}/coins?offset=0&limit=30&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
         try: coins += http(f"{PF}/coins?offset=0&limit=30&sort=market_cap&order=DESC&includeNsfw=false")
         except Exception: pass
         now = time.time()
         new = [c for c in coins if not c.get("complete") and c["mint"] not in self.watch
-               and now - self.seen.get(c["mint"], 0) > STRAT["rescan_s"]][:15]
+               and now - self.seen.get(c["mint"], 0) > self.strategy["rescan_s"]][:15]
         for c in new: self.seen[c["mint"]] = now; self.evaluate(c); self.manage()
         self.recheck(); self.manage(); self.write()
 

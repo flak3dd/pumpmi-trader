@@ -53,6 +53,10 @@ class Engine:
         if not ok:
             self.ledger.skip(sym, reason, forever, m.dev_wallet)
             self.board.put(sym, "done", verdict="SKIP", reason=reason, **info); return "SKIP", reason
+        max_open = self.cfg.get("max_open", 6)
+        if len(self.positions) >= max_open:
+            reason = f"max {max_open} open"
+            self.board.put(sym, "done", verdict="SKIP", reason=reason, **info); return "SKIP", reason
         usd = min(self.cfg["position_usd"], self.cash)
         if usd <= 0:
             self.board.put(sym, "done", verdict="SKIP", reason="no cash", **info); return "SKIP", "no cash"
