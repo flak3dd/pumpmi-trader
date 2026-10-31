@@ -15,6 +15,9 @@ longer checkpoint cannot pass as rising flow. The last watch window is gated
 on its own: a whole-tape cap can pass while the window that triggers the
 entry is a single wallet, or while that window itself is net selling. A
 last-window imbalance ratio of 0 disables only that bid test.
+Same-wallet round trip is separate from that bid: sells from other wallets
+do not count, so a tape can clear 1.3 while the buyers have already sold
+half of what they bought. A round-trip cap of 100 or more disables that test.
 """
 from __future__ import annotations
 
@@ -75,6 +78,7 @@ def summarize(trades: list, meaningful_sol: float = FLOW_MEANINGFUL_SOL) -> dict
     buy_sol = 0.0
     sell_sol = 0.0
     buyers: dict[str, float] = {}
+    sellers: dict[str, float] = {}
     for trade in trades:
         quote = float(trade["quote_sol"])
         if trade["side"] == "buy":
@@ -82,6 +86,10 @@ def summarize(trades: list, meaningful_sol: float = FLOW_MEANINGFUL_SOL) -> dict
             buyers[trade["user"]] = buyers.get(trade["user"], 0.0) + quote
         else:
             sell_sol += quote
+            user = trade.get("user") or "unknown"
+            sellers[user] = sellers.get(user, 0.0) + quote
+    matched = sum(min(amount, sellers.get(user, 0.0)) for user, amount in buyers.items())
+    round_trip_pct = (100.0 * matched / buy_sol) if buy_sol > 0 else 0.0
     if sell_sol > 0:
         imbalance = buy_sol / sell_sol
     else:
@@ -102,6 +110,7 @@ def summarize(trades: list, meaningful_sol: float = FLOW_MEANINGFUL_SOL) -> dict
         "top3_buyer_pct": top3_pct,
         "meaningful_buyers": meaningful,
         "meaningful_sol": floor,
+        "round_trip_pct": round_trip_pct,
         "trades": len(trades),
     }
 
@@ -118,6 +127,7 @@ def with_last_window(summary: dict, trades: list, since_ts: float | None) -> dic
         summary["last_window_buy_sol"] = None
         summary["last_window_signed_sol"] = None
         summary["last_window_imbalance"] = None
+        summary["last_window_round_trip_pct"] = None
         return summary
     cutoff = float(since_ts)
     late = [trade for trade in trades if float(trade["ts"]) >= cutoff]
@@ -127,6 +137,7 @@ def with_last_window(summary: dict, trades: list, since_ts: float | None) -> dic
     summary["last_window_buy_sol"] = late_summary["buy_sol"]
     summary["last_window_signed_sol"] = late_summary["signed_quote_sol"]
     summary["last_window_imbalance"] = late_summary["imbalance"]
+    summary["last_window_round_trip_pct"] = late_summary["round_trip_pct"]
     return summary
 
 
@@ -137,14 +148,17 @@ def last_window_allows(summary: dict | None, strat: dict) -> tuple[bool, str]:
     window is a single buyer, or while that window is net selling. That window
     is the paper entry's counterparty. A buyer minimum of 0 and a top-buyer cap
     of 100 or more disable the breadth test. An imbalance ratio of 0 disables
-    the bid test. Either control left on still fails closed when its fields are missing.
+    the bid test. A round-trip cap of 100 or more disables that test. Any control
+    left on still fails closed when its fields are missing.
     """
     need = int(strat["flow_last_window_min_buyers"])
     cap = float(strat["flow_last_window_max_whale_pct"])
     ratio = float(strat.get("flow_last_window_min_bs_ratio", strat["flow_min_bs_ratio"]))
+    round_trip_cap = float(strat.get("flow_max_round_trip_pct", 50))
     buyers_off = need <= 0 and cap >= 100
     imbalance_off = ratio <= 0
-    if buyers_off and imbalance_off:
+    round_trip_off = round_trip_cap >= 100
+    if buyers_off and imbalance_off and round_trip_off:
         return True, "flow last window disabled"
     if not summary:
         return False, "flow last window unavailable"
@@ -166,8 +180,18 @@ def last_window_allows(summary: dict | None, strat: dict) -> tuple[bool, str]:
             return False, f"flow last window top buyer {float(top):.0f}% > {cap:g}%"
     if not imbalance_off and (float(signed) <= 0 or float(imbalance) < ratio):
         return False, f"flow last window imbalance {float(imbalance):.2f} < {ratio:g}"
+    if not round_trip_off:
+        round_trip = summary.get("last_window_round_trip_pct")
+        if round_trip is None:
+            return False, "flow last window round trip unavailable"
+        if float(round_trip) > round_trip_cap:
+            return False, f"flow last window round trip {float(round_trip):.0f}% > {round_trip_cap:g}%"
     if buyers_off:
-        return True, f"flow last window imbalance {float(imbalance):.2f}"
+        if imbalance is not None and not imbalance_off:
+            return True, f"flow last window imbalance {float(imbalance):.2f}"
+        if not round_trip_off:
+            return True, f"flow last window round trip {float(summary.get('last_window_round_trip_pct')):.0f}%"
+        return True, "flow last window"
     bid = "" if imbalance is None else f", imbalance {float(imbalance):.2f}"
     return True, f"flow last window buyers {int(buyers)}, top {float(top):.0f}%{bid}"
 
@@ -202,6 +226,13 @@ def flow_allows(summary: dict | None, strat: dict, strong: bool = False) -> tupl
     need_meaningful = int(strat["flow_strong_meaningful_buyers"] if strong else strat["flow_min_meaningful_buyers"])
     if int(meaningful) < need_meaningful:
         return False, f"flow meaningful buyers {int(meaningful)} < {need_meaningful}"
+    round_trip_cap = float(strat.get("flow_max_round_trip_pct", 50))
+    if round_trip_cap < 100:
+        round_trip = summary.get("round_trip_pct")
+        if round_trip is None:
+            return False, "flow round trip unavailable"
+        if float(round_trip) > round_trip_cap:
+            return False, f"flow round trip {float(round_trip):.0f}% > {round_trip_cap:g}%"
     breadth = "strong breadth, " if strong else ""
     return True, (
         f"flow {breadth}signed {signed:+.2f} SOL, imbalance {imbalance:.2f}, "
@@ -233,6 +264,15 @@ def accelerating(slices: list | None, dust_sol: float, durations: list | None = 
     return True, f"flow accel {short:+.3f}/{medium:+.3f}/{long:+.3f} SOL"
 
 
+def _round_trip_score(pct, cap: float) -> float:
+    """1 when the cap is off or the tape has no matched round trip. Missing is 0."""
+    if pct is None:
+        return 0.0
+    if cap >= 100:
+        return 1.0
+    return max(0.0, (float(cap) - float(pct)) / max(float(cap), 1e-9))
+
+
 def flow_reversed(entry_lamports: int | None, now_lamports: int | None, entry_flow_sol: float,
                   dust_sol: float = 0.05, giveback: float = 0.25) -> bool:
     """Post-entry net SOL has given back a material share of the inflow that qualified the entry.
@@ -251,8 +291,9 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
                     durations: list | None = None) -> float:
     """0 at the floor, 1 when breadth, imbalance, concentration, and acceleration are all clearly stronger.
 
-    Top-3 slack, meaningful-buyer slack, and last-window slack participate with
-    the older four terms. A measured last-window imbalance adds to that slack.
+    Top-3 slack, meaningful-buyer slack, last-window slack, and same-wallet
+    round-trip slack participate with the older four terms. A measured
+    last-window imbalance adds to that slack. A lower round-trip share sizes up.
     Missing distribution fields contribute 0, so an
     unmeasured tape cannot size up. When window lengths are passed, the
     acceleration term is the SOL/s ratio, so a longer last window does not by
@@ -297,6 +338,7 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
     need_late = int(strat.get("flow_last_window_min_buyers", 3))
     late_cap = float(strat.get("flow_last_window_max_whale_pct", 50))
     late_ratio = float(strat.get("flow_last_window_min_bs_ratio", strat.get("flow_min_bs_ratio", 1.3)))
+    round_trip_cap = float(strat.get("flow_max_round_trip_pct", 50))
     if late_buyers is None or late_top is None:
         late_score = 0.0
     elif need_late <= 0 and late_cap >= 100 and (late_imbalance is None or late_ratio <= 0):
@@ -311,10 +353,15 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
                 parts_late.append(1.0)
             else:
                 parts_late.append(max(0.0, (float(late_imbalance) - late_ratio) / max(late_ratio, 1e-9)))
+        late_rt = summary.get("last_window_round_trip_pct")
+        # A missing last-window round trip does not dilute tapes recorded before the field.
+        if late_rt is not None:
+            parts_late.append(_round_trip_score(late_rt, round_trip_cap))
         late_score = sum(parts_late) / len(parts_late)
+    round_trip_score = _round_trip_score(summary.get("round_trip_pct"), round_trip_cap)
     parts = (
         min(buyers, 1), min(imbalance, 1), min(whale, 1), min(accel, 1),
-        min(top3_score, 1), min(meaningful_score, 1), min(late_score, 1),
+        min(top3_score, 1), min(meaningful_score, 1), min(late_score, 1), min(round_trip_score, 1),
     )
     return max(0.0, min(1.0, sum(parts) / len(parts)))
 

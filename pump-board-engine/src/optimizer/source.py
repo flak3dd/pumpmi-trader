@@ -16,7 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..curve import curve_progress_from_account_data
+from ..curve import parse_curve_account_data, sol_price_usd
 
 
 PUMP_FRONTEND_V3 = "https://frontend-api-v3.pump.fun"
@@ -76,6 +76,19 @@ def _rpc_value(payload: Any, method: str, label: str = "holder") -> Any:
     if not isinstance(result, dict) or "value" not in result:
         raise SourceError(f"{label} {method} returned no result value")
     return result["value"]
+
+
+def _quote_sol(value: Any) -> float | None:
+    """SOL market-cap quote. Missing or non-positive is not a price."""
+    if isinstance(value, bool):
+        return None
+    try:
+        quote = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(quote) or quote <= 0:
+        return None
+    return quote
 
 
 def _ui_amount(value: Any, label: str) -> float:
@@ -256,7 +269,7 @@ class PumpFunSource:
                 return value.strip()
         return ""
 
-    def _reserve_progress(self, coins: list[dict[str, Any]]) -> dict[str, float]:
+    def _reserve_accounts(self, coins: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """One getMultipleAccounts read of bonding-curve reserves.
 
         An empty map means the read failed. Callers must not substitute
@@ -280,13 +293,13 @@ class PumpFunSource:
             return {}
         if not isinstance(values, list):
             return {}
-        found: dict[str, float] = {}
+        found: dict[str, dict[str, Any]] = {}
         for address, value in zip(addresses, values):
             if not isinstance(value, dict):
                 continue
-            progress = curve_progress_from_account_data(value.get("data"))
-            if progress is not None:
-                found[address] = progress
+            parsed = parse_curve_account_data(value.get("data"))
+            if parsed is not None:
+                found[address] = parsed
         return found
 
     def _listing(self) -> list[dict[str, Any]]:
@@ -327,7 +340,7 @@ class PumpFunSource:
                     by_mint[str(detail["mint"])] = detail
             # Reserve progress for this poll. A failed batch leaves the map empty
             # and every row curve_known false; prices are still recorded.
-            progress_by_curve = self._reserve_progress(list(by_mint.values()))
+            accounts_by_curve = self._reserve_accounts(list(by_mint.values()))
             observations: list[dict[str, Any]] = []
             holder_checks = 0
             for coin in list(by_mint.values())[: self.max_listing + self.max_tracked]:
@@ -350,9 +363,9 @@ class PumpFunSource:
                 except (TypeError, ValueError):
                     replies = 0
                 address = self._curve_address(coin)
-                progress = progress_by_curve.get(address)
-                known = progress is not None
-                observations.append({
+                parsed = accounts_by_curve.get(address)
+                known = parsed is not None
+                observation: dict[str, Any] = {
                     "mint": mint,
                     "symbol": str(coin.get("symbol") or "?")[:32],
                     "name": str(coin.get("name") or "")[:120],
@@ -360,14 +373,25 @@ class PumpFunSource:
                     "market_cap": round(market_cap, 6),
                     # Unknown reserves stay numeric for the NOT NULL column and are
                     # flagged so the 25–85% band cannot treat 0 as a real print.
-                    "curve_pct": round(float(progress), 4) if known else 0.0,
+                    "curve_pct": round(float(parsed["curve_pct"]), 4) if known else 0.0,
                     "curve_known": known,
                     "created_at": float(coin.get("created_timestamp") or 0) / 1000.0 if coin.get("created_timestamp") else None,
                     "reply_count": replies,
                     "risk": risk,
                     "social": {"status": "unavailable", "sentiment": None, "source": "none"},
                     "source": self.name,
-                })
+                }
+                if known and parsed is not None:
+                    observation["virtual_sol"] = int(parsed["virtual_sol"])
+                    observation["virtual_token"] = int(parsed["virtual_token"])
+                    quote = _quote_sol(coin.get("market_cap_quote"))
+                    if quote is not None and quote > 0:
+                        observation["sol_usd"] = round(market_cap / quote, 6)
+                    else:
+                        implied = sol_price_usd(market_cap, int(parsed["virtual_sol"]), int(parsed["virtual_token"]))
+                        if implied is not None:
+                            observation["sol_usd"] = round(implied, 6)
+                observations.append(observation)
             return SourceBatch(observations=observations, source_name=self.name, social=self.social_label)
         except SourceError as exc:
             return SourceBatch(observations=[], source_name=self.name, social=self.social_label, error=str(exc))

@@ -31,6 +31,7 @@ from src.optimizer.policy import (  # noqa: E402
     record_watch_observation,
     risk_reason,
     watch_checkpoint_state,
+    entry_reason,
     watch_entry_reason,
 )
 from src.optimizer.replay import chronological_split, replay, validate_candidates  # noqa: E402
@@ -483,6 +484,43 @@ class OptimizerTests(unittest.TestCase):
         self.assertAlmostEqual(kept["metrics"]["net"], 7.54, places=2)
         self.assertIsNone(watch_entry_reason(good[3], _watch_through(good[:4])))
 
+    def test_expensive_curve_depth_does_not_buy_the_stop(self) -> None:
+        """A $2,000 book on these reserves loses more than 10% if spot does not move.
+
+        The same accelerating path without reserve words still enters and stops.
+        Before the drag gate that stop is net -30.68. After it, the trade is not opened.
+        A $30,000 book on the same reserves still clears the gate.
+        """
+        periods = {"short": 30, "medium": 180, "long": 1065}
+        reserves = {"virtual_sol": 40_000_000_000, "virtual_token": 10**15}
+
+        def row(stamp: float, mcap: float, curve: float) -> dict:
+            item = known_observation("THIN", stamp, mcap)
+            item["curve_pct"] = curve
+            item["reply_count"] = 2
+            return item
+
+        bare = [
+            row(0, 1_866.67, 40.0),
+            row(30, 1_893.33, 40.30),
+            row(180, 2_000.0, 43.30),
+            row(1065, 2_000.0, 63.30),
+            row(1200, 1_600.0, 60.0),
+        ]
+        priced = [dict(item) for item in bare]
+        priced[3].update(reserves)
+        watch = _watch_through(priced)
+        self.assertIsNone(watch_entry_reason(priced[3], watch))
+        self.assertIn("curve impact", entry_reason(priced[3], watch) or "")
+        deep = dict(priced[3], market_cap=30_000)
+        self.assertIsNone(entry_reason(deep, watch))
+        skipped = replay(priced, periods)
+        self.assertEqual(skipped["metrics"]["closed_trades"], 0)
+        self.assertEqual(skipped["metrics"]["net"], 0)
+        taken = replay(bare, periods)
+        self.assertEqual(taken["metrics"]["closed_trades"], 1)
+        self.assertAlmostEqual(taken["metrics"]["net"], -30.68, places=2)
+
     def test_chronological_split_never_divides_same_timestamp_cohort(self) -> None:
         observations: list[dict] = []
         for mint in ("A", "B", "C"):
@@ -635,6 +673,8 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(by_mint["LATE"]["curve_known"])
         self.assertIn("curve outside", risk_reason(by_mint["LATE"]) or "")
         self.assertAlmostEqual(by_mint["MID"]["curve_pct"], 40.0, delta=0.2)
+        self.assertEqual(by_mint["MID"]["virtual_sol"], 30_000_000_000)
+        self.assertGreater(by_mint["MID"]["sol_usd"], 1)
         self.assertIsNone(risk_reason(by_mint["MID"]))
         # The old proxy would have rejected this $10k print (about 14%) and accepted the late one.
         self.assertFalse(25 <= 100 * 10000 / 69000 <= 85)

@@ -8,8 +8,10 @@ from src.curve import (
     buy_fill,
     curve_progress_from_account_data,
     curve_progress_pct,
+    flat_round_trip_pct,
     parse_curve_account,
     sell_eff,
+    sol_price_usd,
 )
 
 
@@ -51,6 +53,17 @@ def test_buy_and_sell_are_worse_than_spot_and_flat_round_trip_loses():
     exited = sell_eff(spot, filled["tokens"], virtual_sol, virtual_token, 100)
     assert exited < spot * 0.99
     assert exited / filled["entry_eff"] - 1 < 0
+
+
+def test_flat_round_trip_is_none_until_the_curve_can_be_priced():
+    assert flat_round_trip_pct(10_000, 130, 0, None, None, 100) is None
+    assert sol_price_usd(0, 40_000_000_000, 10**15) is None
+    price = sol_price_usd(2_000, 40_000_000_000, 10**15)
+    assert price is not None and price == 50
+    drag = flat_round_trip_pct(2_000, 130, price, 40_000_000_000, 10**15, 100)
+    deep = flat_round_trip_pct(30_000, 130, sol_price_usd(30_000, 40_000_000_000, 10**15), 40_000_000_000, 10**15, 100)
+    assert drag is not None and deep is not None
+    assert drag < -10 < deep < 0
 
 
 def test_missing_reserves_still_charge_the_fee():
