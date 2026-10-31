@@ -13,6 +13,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -508,7 +509,7 @@ class OptimizerTests(unittest.TestCase):
                 values.append({"data": [raw, "base64"]} if raw else None)
             return {"jsonrpc": "2.0", "result": {"value": values}}
 
-        source = PumpFunSource(http_get=lambda _url: list(coins.values()), holder_cache=_Holders(), rpc=rpc)
+        source = PumpFunSource(http_get=lambda _url: list(coins.values()), holder_cache=cast(HolderRiskCache, _Holders()), rpc=rpc)
         batch = source.collect([], now=10)
         self.assertIsNone(batch.error)
         by_mint = {row["mint"]: row for row in batch.observations}
