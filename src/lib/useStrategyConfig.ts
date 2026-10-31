@@ -48,6 +48,21 @@ export default function useStrategyConfig() {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const loadId = useRef(0);
 
+  function adoptConfig(next: StrategyConfig) {
+    if (
+      next.revision <= savedRef.current.revision ||
+      saving.current ||
+      !matches(draftRef.current, savedRef.current.watchPeriods)
+    )
+      return;
+    ++loadId.current;
+    savedRef.current = next;
+    draftRef.current = { ...next.watchPeriods };
+    setConfig(next);
+    setPeriods({ ...next.watchPeriods });
+    setStatus(next.editable ? "saved" : "offline");
+    setError("");
+  }
   async function readConfig() {
     const r = await fetch("/api/strategy", { cache: "no-store" });
     if (!r.ok) throw new Error("The configuration adapter is unavailable.");
@@ -185,6 +200,7 @@ export default function useStrategyConfig() {
     status,
     error,
     updateTier,
+    adoptConfig,
     retry: () => (status === "offline" ? void load() : void flush()),
   };
 }

@@ -39,9 +39,9 @@ The maximum number of open paper positions is **6**. The strategy configuration,
 {"watchPeriods":{"short":90,"medium":180,"long":300},"revision":0}
 ```
 
-The adapter validates values and atomically saves `pump-board-engine/strategy.json`. Revision conflicts return `409` rather than silently overwriting another change. The frontend retains the draft and offers a retry after reading the current revision. Other risk controls remain read-only, and the capacity stays fixed at six.
+Without a managed database, the adapter validates values and atomically saves `pump-board-engine/strategy.json`. With the durable optimizer enabled, updates are revision-checked in MySQL instead. Revision conflicts return `409` rather than silently overwriting another change. The frontend retains the draft and offers a retry after reading the current revision. Other risk controls remain read-only, and the capacity stays fixed at six.
 
-Configuration survives adapter/feed restarts in the same working directory. A container's writable filesystem is temporary: copy or commit configuration before replacing a deployment if those runtime changes must survive redeployment. No database is provisioned by this project. The paper feed reads persisted configuration at tick boundaries, but changing sliders does not automatically start a feed or fetch new market data.
+Local file configuration survives adapter/feed restarts in the same working directory but not necessarily a deployment replacement. The always-on optimizer persists configuration, observations, paper positions, and reviews in the managed database. Its initial baseline is the current user-edited strategy document, seeded only into a missing namespace; saved database settings are never reset from a repository file on boot. Changing sliders alone does not enable a worker.
 
 ## Snapshots, simulations, and charts
 
@@ -65,3 +65,39 @@ cd pump-board-engine && python3 -m pytest -q tests
 API and engine checks cover configuration validation/persistence, revision conflicts, three real watch checkpoints, six-position enforcement, exact fixture price data, and isolation from recorded datasets. DOM checks cover three token windows, three debounced sliders, failed-save retry, slots, lanes, journal filtering, inspection, preferences, simulation, and snapshot restoration. No browser is needed for these checks.
 
 Energy flow respects system reduced-motion preferences and can be disabled in Settings. Keyboard users can focus search with Command/Ctrl+K and close dialogs with Escape. For the original engine architecture and risks, see [pump-board-engine/README.md](pump-board-engine/README.md).
+
+## Always-on forward-paper optimizer
+
+The production Docker service enables a deterministic worker with `PUMPMI_OPTIMIZER_ENABLED=1`. It requires a managed MySQL `DATABASE_URL` and reserved always-on hosting; a Preview process or a sleeping on-demand container is not a 24/7 deployment. The optimizer collects public pump.fun market-cap observations, rotates bounded token refreshes, and records a strategy review at each 30-minute boundary. Public-source failures are visible and never replaced with fixture prices or fixture sentiment. LunarCrush sentiment is currently unavailable and is not used as a fake signal.
+
+This forward-paper portfolio is distinct from the checked-in historical ledger. It starts with a $1,500 simulated bankroll, retains the six-position cap and paper exit constraints, and records gross results, modeled execution costs, net results, equity, drawdown, and completed trades. Costs assume **1% fees plus 1% slippage per side**; these are explicit modeling assumptions, not measured fills or a quoted provider fee schedule. Sampling and gap risk remain limitations of the model.
+
+At most seven neighboring Short/Medium/Long configurations are considered. Candidate selection uses earlier chronological cohorts; evaluation uses later held-out cohorts, with training prices cut off at the split. No promotion occurs before at least 30 completed held-out trades, positive modeled net expectancy, profit factor above 1.1, improvement over the champion on the same held-out cohort set, and drawdown no greater than 10%. Open trades are not artificially closed for a favorable score. Sparse or stale data produces a waiting-for-evidence report rather than an arbitrary config change. A promoted strategy can be rolled back to the prior validated champion if forward paper drawdown exceeds the threshold. Repeated testing can still overfit; none of these gates guarantees future profit or profit in every half-hour.
+
+`GET /api/optimizer` reports worker state, lease ownership, source freshness/errors, champion settings, evidence decisions, cost assumptions, six recent half-hour windows, and review history. When the forward feed has observations, `GET /api/snapshot` can return a `live` forward-paper board and sampled market-cap paths. Pausing UI monitoring does **not** stop the independent worker. Fixture simulation remains isolated.
+
+Initialize the additive optimizer schema and preserve any existing seed:
+
+```bash
+python3 scripts/migrate_optimizer.py
+```
+
+The managed database is shared by development and production. Software checks use injected SQLite stores and source mocks, never production market records as fabricated profit evidence. Do not run live integration writes as disposable tests. The worker uses a database lease so overlapping deployment processes do not independently run the same paper portfolio. Container restarts recover durable state rather than creating new bankrolls.
+
+```bash
+python3 scripts/test_optimizer.py
+```
+
+Reserved hosting must be confirmed in the product's hosting card and the accepted source version published before this is reported as an active always-on service. The UI displays disabled, warming-up, degraded, and waiting states explicitly. Keep the project's visibility restricted to authorized collaborators if strategy configuration or performance data is private.
+
+## Hourly capability and profitability analysis
+
+Once the published always-on paper worker is active, its monitor evaluates contiguous 3,600-second operation windows from activation. It never launches an overlapping copy or resets the bankroll. Hourly reports persist net/gross completed-trade P&L, modeled execution costs, equity change, observed drawdown, trade count, win rate, fresh-source coverage, and strategy revisions. Sparse or stale coverage is marked insufficient; a full hour with no completed trades is not labeled a win. A window spanning several strategy revisions is an operational summary, not a controlled comparison proving that an enhancement caused profit. Hourly reports appear in the optimizer status panel.
+
+The separately requested agent-led GitHub improvement cadence is every 10 minutes, targeting two tested, evidence-based enhancements and pushes to `main`. Its scheduling request was rejected while this project was undeployed. It is **not enabled** until the hosting confirmation and deployment prerequisites are completed and scheduling succeeds. This code does not fake that timer with a sandbox loop.
+
+## Production holder-risk RPC
+
+Set `SOLANA_RPC_URL` as a protected **server-side project secret** to a reliable Solana mainnet HTTPS endpoint supporting `getTokenLargestAccounts`, `getTokenSupply`, and `getTokenAccountsByOwner`. Do not put a provider URL containing an API key in frontend code or a Git commit. Without it, the bot tries Solana's shared public endpoint and retains unknown-risk entry blocking on rate limits.
+
+The real 2026-10-31 readiness run collected live pump.fun prices, but the public Solana endpoint returned 429 and the documented PublicNode alternative returned 403 for holder reads. No access-denied endpoint was bypassed and no paper entry was forced. The worker can collect actual prices while entries await both the configured watch windows and validated risk metadata. Continuous hosting and the requested ten-minute agent schedule remain separate deployment prerequisites.

@@ -1,0 +1,6 @@
+{
+  "include": ["scripts", "pump-board-engine/src", "pump-board-engine/tests"],
+  "exclude": ["node_modules", "dist", "pump-board-engine/.venv"],
+  "extraPaths": ["pump-board-engine"],
+  "pythonVersion": "3.12"
+}

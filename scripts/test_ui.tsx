@@ -63,8 +63,69 @@ let strategyState = {
   paperOnly: true,
 };
 let failNextSave = false;
+const optimizerStatus = {
+  enabled: true,
+  runtime: "running",
+  paperOnly: true,
+  intervalSeconds: 1800,
+  lastTick: Date.now() / 1000,
+  lastReview: null,
+  nextReview: Date.now() / 1000 + 1800,
+  bootId: "test-only",
+  leaseOwned: true,
+  source: {
+    name: "Software-test source",
+    lastObservation: Date.now() / 1000,
+    error: null,
+    observations: 80,
+    trackedTokens: 32,
+    social: "unavailable",
+  },
+  champion: {
+    watchPeriods: { short: 90, medium: 180, long: 300 },
+    revision: 0,
+  },
+  portfolio: {
+    equity: 1500,
+    cash: 1500,
+    bankroll: 1500,
+    grossRealized: 0,
+    modeledCosts: 0,
+    netRealized: 0,
+    openPositions: 0,
+    drawdownPct: 0,
+    closedTrades: 0,
+  },
+  costModel: {
+    feeBps: 100,
+    slippageBps: 100,
+    label: "Software-test cost assumptions",
+  },
+  windows: [
+    {
+      start: 1800,
+      end: 3600,
+      gross: 0,
+      costs: 0,
+      net: 0,
+      closedTrades: 0,
+      hasTrades: false,
+    },
+  ],
+  validation: {
+    state: "waiting",
+    reason: "Insufficient held-out trades",
+    trainTrades: 0,
+    testTrades: 0,
+    testPF: null,
+    testNet: null,
+    maxDrawdown: null,
+  },
+  reviews: [],
+};
 (globalThis as any).fetch = async (url: string, options?: RequestInit) => {
   requests.push(`${options?.method || "GET"} ${url}`);
+  if (url === "/api/optimizer") return Response.json(optimizerStatus);
   if (url === "/api/snapshot") return Response.json(recorded);
   if (url === "/api/simulate") {
     assert.equal(options?.body, "{}");
@@ -100,6 +161,12 @@ const user = userEvent.setup({ document: dom.window.document });
 const result = render(React.createElement(App));
 await screen.findByText("RECORDED SNAPSHOT");
 await screen.findByText("Config saved");
+await screen.findByText("Collecting market data");
+assert.ok(screen.getByText("Waiting for evidence"));
+assert.ok(screen.getByText("Empty windows are not wins"));
+assert.ok(screen.getByText("No guaranteed profit. No real orders."));
+assert.ok(screen.getByText(/1% fee.*1% slippage assumed per side/));
+assert.ok(screen.getByText("Insufficient held-out trades"));
 assert.equal(screen.getAllByRole("slider").length, 3);
 assert.ok(screen.getByText("/ 6 slots"));
 assert.equal(
@@ -300,6 +367,36 @@ assert.equal(
   "stale StrictMode load must never overwrite a newer slider save",
 );
 cleanup();
+const useStrategyConfig = (await import("../src/lib/useStrategyConfig"))
+  .default;
+const { renderHook } = await import("@testing-library/react");
+const configHook = renderHook(() => useStrategyConfig());
+await waitFor(() => assert.equal(configHook.result.current.status, "saved"));
+const promoted = {
+  ...strategyState,
+  revision: strategyState.revision + 1,
+  watchPeriods: { short: 135, medium: 255, long: 435 },
+};
+act(() => configHook.result.current.adoptConfig(promoted));
+assert.equal(
+  configHook.result.current.periods.medium,
+  255,
+  "validated automatic promotion updates saved sliders",
+);
+act(() => configHook.result.current.updateTier("short", 150));
+act(() =>
+  configHook.result.current.adoptConfig({
+    ...promoted,
+    revision: promoted.revision + 1,
+    watchPeriods: { short: 90, medium: 240, long: 420 },
+  }),
+);
+assert.equal(
+  configHook.result.current.periods.short,
+  150,
+  "automatic promotion must not overwrite unsaved user draft",
+);
+configHook.unmount();
 console.log(
   "UI checks passed: 3 token timeframes, 6 slots, debounced config sliders, failed-save retry, snapshot, lanes, consistent ledger returns, skip verdicts, detail, journal search/filter, strategy, preferences, simulation, and snapshot restoration.",
 );
