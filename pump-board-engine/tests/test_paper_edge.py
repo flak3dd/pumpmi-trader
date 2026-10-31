@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.live_feed as live_feed
+from src.exits import vol_stop_hit, vol_stop_pct
 from src.holders import account_ui_amount, concentration, largest_account_rows
 from src.live_feed import STRAT, Feed
 
@@ -61,6 +62,7 @@ def _flow(buyers=16):
         "meaningful_buyers": buyers, "trades": buyers + 2,
         "last_window_buyers": buyers, "last_window_top_pct": 12.0, "last_window_buy_sol": 0.8,
         "last_window_signed_sol": 0.8, "last_window_imbalance": 4.0,
+        "last_window_sell_sol": 0.2, "last_window_top_seller_pct": 25.0,
         "round_trip_pct": 0.0, "last_window_round_trip_pct": 0.0,
     }
 
@@ -105,6 +107,10 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["flow_last_window_min_bs_ratio"] == 1.3
     assert STRAT["flow_max_round_trip_pct"] == 50
     assert STRAT["flow_fallback_rise_pts"] == 3
+    assert STRAT["flow_last_window_max_seller_pct"] == 60
+    assert STRAT["flow_last_window_min_sell_sol"] == 0.15
+    assert STRAT["fail_impulse_drop_pct"] == 8
+    assert STRAT["fail_impulse_max_peak_pct"] == 2
     assert STRAT["impact_max_drag_pct"] == -10
     assert STRAT["impact_size_budget_pct"] == -4
     assert STRAT["profit_lock_arm_pct"] == 8
@@ -272,6 +278,35 @@ def test_exits_emergency_vol_breakeven_and_flow_reversal(tmp_path: Path) -> None
         assert "FLOW" not in feed.pos
         assert feed.ledger.fills[-1][5].startswith("flow exit")
 
+        # Wild returns widen the vol band to the hard stop, so −8% spot used to stay open
+        # until net itself was −15% ($130 * −0.15 = −19.50). Fee-only at spot 92 is about −12.78.
+        plant("IMPULSE")
+        wild = [0.2, -0.2, 0.25, -0.25, 0.2, -0.2]
+        feed.pos["IMPULSE"]["rets"] = list(wild)
+        feed.pos["IMPULSE"]["peak"] = 100
+        feed.pos["IMPULSE"]["last_spot"] = 100
+        band = vol_stop_pct(wild, STRAT)
+        assert band == STRAT["stop_loss_pct"]
+        assert not vol_stop_hit(100, 92, band, STRAT["stop_loss_pct"])
+        entry_eff = 100 / 0.99
+        exit_at_92 = 92 * 0.99
+        held_net = (exit_at_92 / entry_eff - 1.0) * 100.0
+        assert STRAT["stop_loss_pct"] < held_net < 0
+        feed.apply_mark("IMPULSE", {"spot": 92})
+        assert "IMPULSE" not in feed.pos
+        impulse = feed.ledger.fills[-1]
+        assert impulse[0] == "IMPULSE"
+        assert impulse[5].startswith("failed impulse")
+        assert -19.50 < impulse[4] < 0
+
+        # A +6% spot bounce is past the +2% ceiling, so the same −8% print stays open.
+        plant("BOUNCE")
+        feed.pos["BOUNCE"]["rets"] = list(wild)
+        feed.pos["BOUNCE"]["peak"] = 106
+        feed.pos["BOUNCE"]["last_spot"] = 100
+        feed.apply_mark("BOUNCE", {"spot": 92})
+        assert "BOUNCE" in feed.pos
+
 
 def test_distribution_gates_skip_before_a_paper_buy(tmp_path: Path) -> None:
     path = _feed(tmp_path, [1000.0])
@@ -425,6 +460,40 @@ def test_last_window_net_sell_skips_before_a_paper_buy(tmp_path: Path) -> None:
         assert not feed.pos
         assert feed.ledger.skips[-1][1].startswith("flow last window imbalance")
         assert feed.ledger.fills == []
+
+
+def test_last_window_one_seller_skips_before_a_paper_buy(tmp_path: Path) -> None:
+    """Buyer caps, the 1.3 bid, and a zero round trip all pass. One wallet is the offer.
+
+    That seller never has to have bought. Skipping pays 0. A flat $130 round trip
+    on the test curve is a loss, and a −15% net stop on that notional is −19.50.
+    """
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    dumped = dict(
+        _flow(16),
+        last_window_buyers=4, last_window_top_pct=25.0, last_window_buy_sol=1.0,
+        last_window_signed_sol=0.30, last_window_imbalance=1.43, last_window_round_trip_pct=0.0,
+        last_window_sell_sol=0.70, last_window_top_seller_pct=100.0, round_trip_pct=0.0,
+    )
+    coin = _coin(symbol="DUMP", mint="dump-mint-0001")
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(coin)):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since, _last=None: dumped
+        _run_watch(feed, coin, now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("flow last window top seller")
+        assert feed.ledger.fills == []
+        assert STRAT["size_min"] * -0.15 == -19.5
 
 
 def test_round_trip_and_thin_dollar_depth_skip_before_a_paper_buy(tmp_path: Path) -> None:

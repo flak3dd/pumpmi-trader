@@ -1,4 +1,4 @@
-from src.exits import emergency_drop, profit_lock_hit, vol_stop_hit, vol_stop_pct
+from src.exits import emergency_drop, failed_impulse_hit, profit_lock_hit, vol_stop_hit, vol_stop_pct
 from src.live_feed import STRAT
 
 
@@ -36,6 +36,18 @@ def test_vol_stop_uses_the_spot_move_not_the_fee_net():
     assert not vol_stop_hit(100, 85, hard, hard)
     assert not vol_stop_hit(0, 90, quiet, hard)
     assert not vol_stop_hit(None, 90, quiet, hard)
+
+
+def test_failed_impulse_cuts_a_never_green_spot_and_leaves_a_bounce():
+    """−8% spot with no +2% print is the exit. A bounce, a −7% print, and a flat spot are not."""
+    assert failed_impulse_hit(100, 92, 100, 8, 2)
+    assert failed_impulse_hit(100, 92, 101.5, 8, 2)
+    assert not failed_impulse_hit(100, 92, 102, 8, 2)
+    assert not failed_impulse_hit(100, 92, 103, 8, 2)
+    assert not failed_impulse_hit(100, 93, 100, 8, 2)
+    assert not failed_impulse_hit(100, 100, 100, 8, 2)
+    assert not failed_impulse_hit(0, 92, 100, 8, 2)
+    assert not failed_impulse_hit(100, 92, 100, 100, 2)
 
 
 def test_vol_stop_tightens_but_never_widens_past_the_hard_stop():

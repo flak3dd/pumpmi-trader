@@ -19,7 +19,9 @@ v8 expected-edge revision (not a profitability claim):
   L5 the last watch window needs 3 buyers and no wallet above 50% of that window's buy SOL.
   L6 that same window must itself clear the 1.3 buy/sell ratio. A net bid sizes slightly larger inside $130–160.
   L7 same-wallet round trip above 50% of buy SOL skips. Sells from other wallets do not count. A cleaner tape sizes slightly larger inside $130–160.
+  L8 last-window sells of at least 0.15 SOL cannot be one wallet above 60%. The seller does not have to have bought. A spread-out offer sizes slightly larger inside $130–160.
   M5 once net peaks at +8%, a 6-point giveback exits before the +25% scale. The scale still comes first.
+  M8 a position that never printed +2% spot exits once spot is −8%. A widened vol band no longer holds that path to the −15% net stop. A bounce of +2% spot keeps the hard stop.
   M6 a flat round trip worse than -10% at the intended size skips. The curve is priced with the SOL quote, or the price implied by reserves when the quote is missing.
   M7 after that skip, size above the $130 floor is cut until a flat round trip is no worse than -4%. A deep book keeps the signal size, including a similarity boost.
 """
@@ -45,7 +47,7 @@ from .flow import (
     signal_strength, size_for_signal, with_last_window, last_window_allows,
     unavailable_tape_fallback,
 )
-from .exits import emergency_drop, net_change_pct, vol_stop_hit, vol_stop_pct, profit_lock_hit
+from .exits import emergency_drop, failed_impulse_hit, net_change_pct, vol_stop_hit, vol_stop_pct, profit_lock_hit
 
 PF = "https://frontend-api-v3.pump.fun"
 RPC = "https://api.mainnet-beta.solana.com"
@@ -59,12 +61,14 @@ STRAT = dict(
     flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
     flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50, flow_last_window_min_bs_ratio=1.3,
+    flow_last_window_max_seller_pct=60, flow_last_window_min_sell_sol=0.15,
     flow_max_round_trip_pct=50, flow_fallback_rise_pts=3, impact_max_drag_pct=-10, impact_size_budget_pct=-4,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,
     stop_loss_pct=-15, vol_stop_floor_pct=4, vol_stop_mult=2, vol_stop_min_samples=4, be_arm_pct=15,
     profit_lock_arm_pct=8, profit_lock_giveback_pct=6,
+    fail_impulse_drop_pct=8, fail_impulse_max_peak_pct=2,
     scale_out_pct=25, trail_giveback_pct=12, flat_exit_s=720, flat_exit_below_pct=5,
     hard_exit_s=2400, flatten_curve_pct=95,
     v6_size_mult=1.5, v6_trail_relax=1.20, v6_min_hist=30, v7_boost_eq_pct=8, v7_boost_usd_max=500,
@@ -790,6 +794,19 @@ class Feed:
                 self.close(
                     key, spot,
                     f"vol stop {net:.0f}% (spot {spot_change:.0f}%, band {band:.0f}%)",
+                    exit_eff=exit_price,
+                )
+            elif not position.get("scaled") and failed_impulse_hit(
+                entry_spot, spot, position.get("peak"),
+                rules["fail_impulse_drop_pct"], rules["fail_impulse_max_peak_pct"],
+            ):
+                # Quiet tapes already left through the −4% spot band above. This is the
+                # widened-band path: spot is down and the trade never bounced.
+                spot_change = net_change_pct(entry_spot, spot)
+                peak_change = net_change_pct(entry_spot, position.get("peak") or spot)
+                self.close(
+                    key, spot,
+                    f"failed impulse spot {spot_change:.0f}% (peak {peak_change:.0f}%)",
                     exit_eff=exit_price,
                 )
             else:
