@@ -1,0 +1,36 @@
+[Unit]
+Description=Pumpmi continuous live-market paper trader
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/pumpmi-server
+EnvironmentFile=/home/ubuntu/.config/pumpmi/runtime.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/ubuntu/.local/share/pumpmi-venv/bin/python -u /home/ubuntu/pumpmi-server/scripts/serve.py
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+MemoryMax=768M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

@@ -663,6 +663,13 @@ def development_port() -> int:
     return 3001
 
 
+def worker_enabled() -> bool:
+    """Separate a live dashboard replica from its continuous worker host."""
+    return os.environ.get("PUMPMI_WORKER_ENABLED", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def main() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     try:
@@ -671,12 +678,14 @@ def main() -> None:
         raise SystemExit("PORT must be an integer") from exc
     worker = None
     runtime = optimizer_runtime()
-    if runtime is not None and runtime.enabled:
+    if runtime is not None and runtime.enabled and worker_enabled():
         from src.optimizer.runtime import Worker  # type: ignore
 
         worker = Worker(runtime)
         worker.start()
         print(f"Pumpmi optimizer worker requested (boot={runtime.boot_id})", flush=True)
+    elif runtime is not None and runtime.enabled:
+        print("Pumpmi dashboard replica reading the shared live paper feed", flush=True)
     elif OPTIMIZER_RUNTIME_ERROR:
         print(f"Pumpmi optimizer unavailable: {OPTIMIZER_RUNTIME_ERROR}", file=sys.stderr, flush=True)
     server = ThreadingHTTPServer((host, port), PumpmiHandler)
