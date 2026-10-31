@@ -6,7 +6,8 @@ v8 expected-edge revision (not a profitability claim):
   H3 paper fills include the fee and, when reserves are known, bonding-curve impact.
   M1 each watch window's SOL per second must rise; a longer window is not acceleration. Material post-entry SOL outflow exits.
   M2 curve band 30–70%, or 70–85% only with stronger buyer breadth. Above 85% skips.
-  M3 volatility can tighten the stop but not past -15%; +15% net arms fee-inclusive break-even.
+  M3 volatility can tighten the stop on the spot move, not the fee-inclusive net, and not past -15%. +15% net arms fee-inclusive break-even.
+  H4 top-10 and top-5 drop the known curve token account. The largest balance is not treated as the curve, so a whale that outsizes it still counts. A missing curve account skips.
   M4 similarity boost needs >=30 prior exits, is capped at 1.5x, and ignores future rows.
   L1 missing holder/dev/cluster reads skip. L2 curve progress is reserve-based.
   L3 signal strength sizes inside the $130–160 band (loss-streak halving still applies after).
@@ -35,12 +36,13 @@ from .aggregators.fuse import fuse, PLATFORMS
 from .ledger import Ledger
 from . import similarity as SIM
 from .kanban_state import Board
+from .holders import concentration, curve_token_accounts, largest_account_rows
 from .curve import parse_curve_account, buy_fill, sell_eff, flat_round_trip_pct, size_for_curve_depth, sol_price_usd
 from .flow import (
     summarize, trade_from_tx, flow_allows, accelerating, flow_reversed,
     signal_strength, size_for_signal, with_last_window, last_window_allows,
 )
-from .exits import emergency_drop, net_change_pct, vol_stop_pct, profit_lock_hit
+from .exits import emergency_drop, net_change_pct, vol_stop_hit, vol_stop_pct, profit_lock_hit
 
 PF = "https://frontend-api-v3.pump.fun"
 RPC = "https://api.mainnet-beta.solana.com"
@@ -370,13 +372,20 @@ class Feed:
         return with_last_window(summary, trades, last_window_ts)
 
     def holders(self, coin):
+        """Top-1 / top-5 / top-10 percents with the known curve token account removed.
+
+        A missing curve address, or a curve address that is not in the largest
+        accounts, is unavailable. The previous code dropped whichever balance
+        was largest and could therefore delete the whale and keep the curve.
+        """
         try:
             payload = self._rpc("getTokenLargestAccounts", [coin["mint"], {"commitment": "confirmed"}])
-            accounts = [float(account["uiAmount"] or 0) for account in payload["result"]["value"]]
-            supply = float(coin.get("total_supply") or 1e15) / 10 ** int(coin.get("base_decimals", 6))
-            rest = sorted(accounts, reverse=True)[1:]
-            top10 = round(100 * sum(rest[:10]) / supply, 1)
-            return (round(100 * rest[0] / supply, 1) if rest else 0), round(100 * sum(rest[:5]) / supply, 1), top10, supply
+            parsed = largest_account_rows((payload.get("result") or {}).get("value"))
+            supply = float(coin.get("total_supply") or 0) / 10 ** int(coin.get("base_decimals", 6))
+            stats = concentration(parsed or [], supply, curve_token_accounts(coin))
+            if stats is None or supply <= 0:
+                return None, None, None, None
+            return (*stats, supply)
         except Exception:
             return None, None, None, None
 
@@ -752,8 +761,14 @@ class Feed:
             self._scale_or_time(key, position, spot, net, exit_price, age, rules)
         else:
             band = vol_stop_pct(position.get("rets") or [], rules)
-            if band > rules["stop_loss_pct"] and net <= band:
-                self.close(key, spot, f"vol stop {net:.0f}% (band {band:.0f}%)", exit_eff=exit_price)
+            entry_spot = position.get("entry_spot") or position.get("entry")
+            if vol_stop_hit(entry_spot, spot, band, rules["stop_loss_pct"]):
+                spot_change = net_change_pct(entry_spot, spot)
+                self.close(
+                    key, spot,
+                    f"vol stop {net:.0f}% (spot {spot_change:.0f}%, band {band:.0f}%)",
+                    exit_eff=exit_price,
+                )
             else:
                 self._scale_or_time(key, position, spot, net, exit_price, age, rules)
 

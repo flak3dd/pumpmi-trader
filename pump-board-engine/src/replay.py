@@ -142,7 +142,7 @@ def report(fills: list[dict], history: list[dict], strat: dict | None = None) ->
             "reserve-delta acceleration across the three watch windows",
             "optimizer curve-points per second, which needs three distinct checkpoint samples",
             "holder concentration when the ledger stored nulls",
-            "intrabar emergency and volatility stops without a price path",
+            "intrabar emergency and spot-based volatility stops without a price path",
             "pre-scale profit lock, which needs the path between entry and the final fill",
             "depth size cap, which needs virtual reserves and the intended ticket",
             "optimizer net stop and net scale, which need a market-cap print between the spot move and the fee-inclusive trigger",
