@@ -13,7 +13,9 @@ WorkingDirectory=/home/ubuntu/pumpmi-server
 EnvironmentFile=/home/ubuntu/.config/pumpmi/runtime.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/home/ubuntu/.local/share/pumpmi-venv/bin/python -u /home/ubuntu/pumpmi-server/scripts/serve.py
+Environment=HOSTNAME=cloud-pc-2yadkjq6
+Environment=PUMPMI_RPC_CREDENTIAL_FILE=/home/ubuntu/.config/pumpmi/rpc.credential.bin
+ExecStart=/home/ubuntu/.local/share/pumpmi-venv/bin/python -u /home/ubuntu/pumpmi-server/scripts/run_cloud_worker.py
 Restart=always
 RestartSec=10
 TimeoutStopSec=15
