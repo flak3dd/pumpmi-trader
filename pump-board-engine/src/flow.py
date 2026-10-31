@@ -196,8 +196,31 @@ def last_window_allows(summary: dict | None, strat: dict) -> tuple[bool, str]:
     return True, f"flow last window buyers {int(buyers)}, top {float(top):.0f}%{bid}"
 
 
+def unavailable_tape_fallback(reply_count, rise_pts: float, min_rise: float) -> tuple[bool, str]:
+    """Paper P2 when the swap tape cannot be read. Not a claim that the rise is profitable.
+
+    Reply counts do not decide this path. Missing, non-numeric, and zero counts are
+    unavailable: the public reply field is 0 on every coin when that feed is down, so
+    an AND of ``replies >= 2`` and the rise can never pass, and a hard skip on a
+    missing tape has the same result. A positive count is ignored too. A missing
+    tape must not soft-pass on replies alone. The curve has to rise by ``min_rise``
+    points over the watch. Below that, the entry skips. Callers use this only when
+    the tape is missing. A present tape stays on ``flow_allows``.
+    """
+    measured = reply_count if isinstance(reply_count, (int, float)) and not isinstance(reply_count, bool) else None
+    if measured is None or float(measured) <= 0:
+        note = "replies unavailable"
+    else:
+        note = f"replies {int(measured)} ignored"
+    rise = float(rise_pts)
+    need = float(min_rise)
+    if rise + 1e-9 >= need:
+        return True, f"flow n/a -> fallback ({note}, curve {rise:+.1f}pts)"
+    return False, f"flow n/a -> fallback ({note}, curve {rise:+.1f}pts < {need:g})"
+
+
 def flow_allows(summary: dict | None, strat: dict, strong: bool = False) -> tuple[bool, str]:
-    """Enforce P2. A missing summary never passes."""
+    """Enforce P2 when a swap tape exists. A missing summary never passes here."""
     if not summary:
         return False, "flow unavailable"
     need = strat["flow_strong_buyers"] if strong else strat["flow_min_buyers"]

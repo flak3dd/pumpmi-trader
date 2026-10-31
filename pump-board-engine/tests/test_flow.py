@@ -5,6 +5,7 @@ from src.flow import (
     accelerating,
     flow_allows,
     flow_reversed,
+    unavailable_tape_fallback,
     last_window_allows,
     signal_strength,
     size_for_signal,
@@ -44,6 +45,30 @@ def test_sell_and_dust_are_classified():
 def test_summary_and_gate_never_passes_when_missing():
     ok, reason = flow_allows(None, STRAT)
     assert not ok and reason == "flow unavailable"
+
+
+def test_unavailable_replies_use_curve_rise_only_when_the_tape_is_missing():
+    """Zero or absent replies are unknown. The rise alone can clear the fallback.
+
+    A present tape still fails closed in ``flow_allows``. A flat curve still
+    skips, including when a real reply count is present. Replies never replace
+    the tape by themselves.
+    """
+    need = STRAT["flow_fallback_rise_pts"]
+    assert need == 3
+    ok, reason = unavailable_tape_fallback(0, 6.0, need)
+    assert ok and reason == "flow n/a -> fallback (replies unavailable, curve +6.0pts)"
+    ok, reason = unavailable_tape_fallback(None, need, need)
+    assert ok and "replies unavailable" in reason
+    ok, reason = unavailable_tape_fallback("n/a", 4.0, need)
+    assert ok and "replies unavailable" in reason
+    ok, reason = unavailable_tape_fallback(0, 2.9, need)
+    assert not ok and reason == "flow n/a -> fallback (replies unavailable, curve +2.9pts < 3)"
+    ok, reason = unavailable_tape_fallback(40, 0.0, need)
+    assert not ok and reason == "flow n/a -> fallback (replies 40 ignored, curve +0.0pts < 3)"
+    ok, reason = unavailable_tape_fallback(40, 3.0, need)
+    assert ok and "replies 40 ignored" in reason
+    assert flow_allows(None, STRAT) == (False, "flow unavailable")
     empty = summarize([])
     ok, reason = flow_allows(empty, STRAT)
     assert not ok and "buyers" in reason
