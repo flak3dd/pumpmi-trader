@@ -25,6 +25,7 @@ from src.optimizer.policy import (  # noqa: E402
     apply_observation,
     exit_reason,
     initial_portfolio,
+    net_of_costs_pct,
     make_watch_state,
     open_position,
     position_size,
@@ -520,6 +521,65 @@ class OptimizerTests(unittest.TestCase):
         taken = replay(bare, periods)
         self.assertEqual(taken["metrics"]["closed_trades"], 1)
         self.assertAlmostEqual(taken["metrics"]["net"], -30.68, places=2)
+
+    def test_net_exits_and_depth_size_keep_the_flat_cost_model(self) -> None:
+        """A -12% spot print is already a -15% paper loss. A gross stop used to hold it.
+
+        Riding that print on to -20% spot is the old -30.68. Stopping here is about -20.49.
+        A +6% spot print is only about +1.9% net, so the 12-minute soft exit takes it.
+        +30% spot is still a scale, not a lock. On an $8k book a $160 ticket is cut to
+        the $130 floor; a $60k book keeps $160. Neither path is a profitability claim.
+        """
+        portfolio = initial_portfolio()
+        position = open_position(portfolio, known_observation("STOP", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(position)
+        assert position is not None
+        early = known_observation("STOP", 60, 26_400)
+        self.assertGreater(100.0 * (26_400 / 30_000 - 1.0), -15.0)
+        self.assertLess(net_of_costs_pct(30_000, 26_400), -15.0)
+        stopped = apply_observation(portfolio, position["id"], early)
+        self.assertEqual(stopped and stopped["status"], "closed")
+        self.assertIn("stop loss", stopped["reason"] if stopped else "")
+        self.assertAlmostEqual(float(stopped["net"]) if stopped else 0, -20.488, places=2)
+        self.assertGreater(float(stopped["net"]) if stopped else 0, -30.68)
+
+        soft_book = initial_portfolio()
+        soft_position = open_position(soft_book, known_observation("SOFT", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(soft_position)
+        assert soft_position is not None
+        # +6% spot is above the old 5% gross soft line and still under +5% net.
+        self.assertLess(net_of_costs_pct(30_000, 31_800), 5.0)
+        softened = apply_observation(soft_book, soft_position["id"], known_observation("SOFT", 800, 31_800))
+        self.assertEqual(softened and softened["status"], "closed")
+        self.assertTrue((softened or {}).get("reason", "").startswith("soft 12m"))
+        self.assertGreater(float(softened["net"]) if softened else 0, 0)
+
+        scale_book = initial_portfolio()
+        runner = open_position(scale_book, known_observation("RUN2", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(runner)
+        assert runner is not None
+        half = apply_observation(scale_book, runner["id"], known_observation("RUN2", 60, 39_000))
+        self.assertEqual(half and half["status"], "scaled")
+
+        rich = initial_portfolio()
+        rich["cash"] = 12_000
+        rich["peak_equity"] = 12_000
+        reserves = {"virtual_sol": 40_000_000_000, "virtual_token": 10**15, "curve_pct": 40.0}
+        thin = known_observation("CUT", 0, 8_000)
+        thin.update(reserves)
+        cut = open_position(rich, thin, strategy_revision=1)
+        self.assertIsNotNone(cut)
+        assert cut is not None
+        self.assertEqual(cut["initial_notional"], 130.0)
+        deep_book = initial_portfolio()
+        deep_book["cash"] = 12_000
+        deep_book["peak_equity"] = 12_000
+        deep = known_observation("DEEPSIZE", 0, 60_000)
+        deep.update(reserves)
+        kept = open_position(deep_book, deep, strategy_revision=1)
+        self.assertIsNotNone(kept)
+        assert kept is not None
+        self.assertEqual(kept["initial_notional"], 160.0)
 
     def test_chronological_split_never_divides_same_timestamp_cohort(self) -> None:
         observations: list[dict] = []

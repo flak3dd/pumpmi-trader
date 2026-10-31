@@ -144,6 +144,8 @@ def report(fills: list[dict], history: list[dict], strat: dict | None = None) ->
             "holder concentration when the ledger stored nulls",
             "intrabar emergency and volatility stops without a price path",
             "pre-scale profit lock, which needs the path between entry and the final fill",
+            "depth size cap, which needs virtual reserves and the intended ticket",
+            "optimizer net stop and net scale, which need a market-cap print between the spot move and the fee-inclusive trigger",
         ],
         "note": "Fee-only remark and gate counts are expected-edge diagnostics, not a profitability claim.",
     }

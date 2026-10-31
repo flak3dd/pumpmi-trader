@@ -10,7 +10,7 @@ from copy import deepcopy
 import math
 from typing import Any
 
-from ..curve import flat_round_trip_pct, sol_price_usd
+from ..curve import flat_round_trip_pct, size_for_curve_depth, sol_price_usd
 from ..exits import profit_lock_hit
 
 
@@ -27,6 +27,9 @@ CURVE_RATE_DUST_PTS = 0.05
 # $130–160 band so a smaller fill is never the size we failed to price.
 IMPACT_MAX_DRAG_PCT = -10.0
 IMPACT_CHECK_USD = 160.0
+# Inside that hard skip, extra dollars are cut until a flat round trip is no
+# worse than the unchanged-spot cost of the 100 bps fee + 100 bps slippage model.
+IMPACT_SIZE_BUDGET_PCT = -4.0
 RISK_LIMITS = {
     "min_curve_pct": 25.0,
     "max_curve_pct": 85.0,
@@ -86,6 +89,31 @@ def position_size(equity: float, *, losing_streak: int = 0) -> float:
     """
     base = max(130.0, min(160.0, max(0.0, equity) * 0.015))
     return round(base * (0.5 if int(losing_streak) >= 3 else 1.0), 2)
+
+
+def _size_floor(notional: float, losing_streak: int) -> float:
+    """Bottom of the band already chosen by ``position_size``. Never a raise."""
+    band = 65.0 if int(losing_streak) >= 3 else 130.0
+    return min(float(notional), band)
+
+
+def sized_notional(notional: float, observation: dict[str, Any], *, losing_streak: int = 0) -> float:
+    """Cut a paper ticket until curve impact fits the fee budget.
+
+    The -10% skip in ``impact_entry_reason`` still uses a $160 check and is not
+    loosened here. Missing reserves keep ``notional``. This is a paper size, not
+    a claim that the smaller ticket is profitable.
+    """
+    virtual_sol = _positive_int(observation.get("virtual_sol"))
+    virtual_token = _positive_int(observation.get("virtual_token"))
+    price = _finite_number(observation.get("market_cap")) or 0.0
+    sol_usd = _finite_number(observation.get("sol_usd"))
+    if (sol_usd is None or sol_usd <= 0) and virtual_sol and virtual_token:
+        sol_usd = sol_price_usd(price, virtual_sol, virtual_token)
+    return size_for_curve_depth(
+        notional, price, sol_usd, virtual_sol, virtual_token, FEE_BPS,
+        budget_pct=IMPACT_SIZE_BUDGET_PCT, floor_usd=_size_floor(notional, losing_streak),
+    )
 
 
 def risk_reason(observation: dict[str, Any]) -> str | None:
@@ -411,7 +439,8 @@ def open_position(
     if len(portfolio["positions"]) >= MAX_OPEN:
         return None
     equity = refresh_equity(portfolio)
-    notional = position_size(equity, losing_streak=int(portfolio.get("losing_streak", 0)))
+    streak = int(portfolio.get("losing_streak", 0))
+    notional = sized_notional(position_size(equity, losing_streak=streak), observation, losing_streak=streak)
     cost = paper_cost(notional)
     if float(portfolio["cash"]) + 1e-9 < notional + cost:
         return None
@@ -451,12 +480,19 @@ def open_position(
 
 
 def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[str, float] | None:
+    """Stop, scale, and the 12-minute flat exit use net of the flat fee model.
+
+    A -15% spot print is about -18.7% after 100 bps fee + 100 bps slippage, so a
+    gross stop waited through prints that were already a -15% paper loss. The
+    same net is what the profit lock uses. The post-scale trail stays on spot.
+    """
     current = float(observation["market_cap"])
     entry = float(position["entry_mcap"])
     change = 100.0 * (current / entry - 1.0)
+    net = net_of_costs_pct(entry, current)
     age = float(observation["observed_at"]) - float(position["entry_at"])
-    if change <= EXIT_RULES["stop_loss_pct"]:
-        return (f"stop loss {change:.1f}%", 1.0)
+    if net <= EXIT_RULES["stop_loss_pct"]:
+        return (f"stop loss {net:.1f}%", 1.0)
     initial_dev = _finite_number((position.get("risk") or {}).get("dev_pct"))
     current_risk = observation.get("risk") or {}
     current_dev = _finite_number(current_risk.get("dev_pct")) if current_risk.get("status") == "known" else None
@@ -467,22 +503,21 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
         curve = _finite_number(observation.get("curve_pct"))
         if curve is not None and curve >= EXIT_RULES["flatten_curve_pct"]:
             return (f"flatten curve {curve:.1f}%", 1.0)
-    if not position.get("scaled") and change >= EXIT_RULES["scale_out_pct"]:
-        return (f"scale half {change:.1f}%", 0.5)
+    if not position.get("scaled") and net >= EXIT_RULES["scale_out_pct"]:
+        return (f"scale half {net:.1f}%", 0.5)
     if position.get("scaled") and current < float(position["peak_mcap"]) * (1.0 - EXIT_RULES["trail_giveback_pct"] / 100.0):
         return (f"trail 12% {change:.1f}%", 1.0)
-    # Scale-out is checked above. A print still short of that target can lock
+    # Scale-out is checked above. A print still short of that net target can lock
     # a real net gain instead of riding the giveback into the hard stop.
-    if not position.get("scaled") and change < EXIT_RULES["scale_out_pct"]:
+    if not position.get("scaled") and net < EXIT_RULES["scale_out_pct"]:
         peak = float(position.get("peak_mcap") or current)
-        net = net_of_costs_pct(entry, current)
         peak_net = net_of_costs_pct(entry, peak)
         if profit_lock_hit(peak_net, net, EXIT_RULES["profit_lock_arm_pct"], EXIT_RULES["profit_lock_giveback_pct"]):
             return (f"profit lock {net:.1f}% (peak {peak_net:.1f}%)", 1.0)
-    if not position.get("scaled") and age >= EXIT_RULES["soft_exit_seconds"] and change < EXIT_RULES["soft_exit_below_pct"]:
-        return (f"soft 12m {change:.1f}%", 1.0)
+    if not position.get("scaled") and age >= EXIT_RULES["soft_exit_seconds"] and net < EXIT_RULES["soft_exit_below_pct"]:
+        return (f"soft 12m {net:.1f}%", 1.0)
     if age >= EXIT_RULES["hard_exit_seconds"]:
-        return (f"hard 40m {change:.1f}%", 1.0)
+        return (f"hard 40m {net:.1f}%", 1.0)
     return None
 
 

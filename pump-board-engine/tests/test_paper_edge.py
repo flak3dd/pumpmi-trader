@@ -104,6 +104,7 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["flow_last_window_min_bs_ratio"] == 1.3
     assert STRAT["flow_max_round_trip_pct"] == 50
     assert STRAT["impact_max_drag_pct"] == -10
+    assert STRAT["impact_size_budget_pct"] == -4
     assert STRAT["profit_lock_arm_pct"] == 8
     assert STRAT["profit_lock_giveback_pct"] == 6
     try:
@@ -437,3 +438,46 @@ def test_round_trip_and_thin_dollar_depth_skip_before_a_paper_buy(tmp_path: Path
         assert feed.ledger.skips[-1][1].startswith("curve impact")
         assert feed.ledger.fills == []
         assert STRAT["size_min"] * -0.15 == -19.5
+
+
+def test_depth_budget_cuts_a_boost_the_hard_drag_gate_still_allows(tmp_path: Path) -> None:
+    """An $8,000 book clears the -10% skip at a boosted size and pays for the curve.
+
+    The -4% budget then cuts that boost back to the $130 floor. A flat round trip
+    at the uncut size loses more dollars than the same flat round trip at $130.
+    A $30,000 book is inside the budget and is not resized by this rule.
+    """
+    from src.curve import flat_round_trip_pct, sol_price_usd
+
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    coin = _coin(symbol="THINBOOST", mint="thin-boost-0001", usd_market_cap=8_000)
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.SIM, "decide", return_value={"decision": "boost", "score": 0.2, "knn_win": 4, "knn_n": 5, "n_hist": 30, "nw": 16, "nl": 14}), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(coin)):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: {"mention_volume": 500, "sentiment_0_100": 80}
+        feed.flow_for = lambda _coin, _since, _last=None: _flow(30)
+        _run_watch(feed, coin, now, curve=40)
+        assert len(feed.pos) == 1
+        position = next(iter(feed.pos.values()))
+        assert position["usd"] == STRAT["size_min"]
+        reason = feed.ledger.fills[-1][5]
+        assert "depth size $130 from $" in reason
+        uncut = float(reason.split("depth size $130 from $", 1)[1].split(",", 1)[0])
+        assert uncut > STRAT["size_min"]
+        virtual_sol, virtual_token = 40_000_000_000, 1_000_000_000_000_000
+        sol_px = sol_price_usd(8_000, virtual_sol, virtual_token)
+        assert sol_px is not None
+        full = flat_round_trip_pct(8_000, uncut, sol_px, virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+        cut = flat_round_trip_pct(8_000, position["usd"], sol_px, virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+        assert full is not None and cut is not None
+        assert STRAT["impact_max_drag_pct"] < full < STRAT["impact_size_budget_pct"]
+        assert uncut * full / 100 < position["usd"] * cut / 100

@@ -18,6 +18,7 @@ v8 expected-edge revision (not a profitability claim):
   L7 same-wallet round trip above 50% of buy SOL skips. Sells from other wallets do not count. A cleaner tape sizes slightly larger inside $130–160.
   M5 once net peaks at +8%, a 6-point giveback exits before the +25% scale. The scale still comes first.
   M6 a flat round trip worse than -10% at the intended size skips. The curve is priced with the SOL quote, or the price implied by reserves when the quote is missing.
+  M7 after that skip, size above the $130 floor is cut until a flat round trip is no worse than -4%. A deep book keeps the signal size, including a similarity boost.
 """
 import base64
 import json
@@ -34,7 +35,7 @@ from .aggregators.fuse import fuse, PLATFORMS
 from .ledger import Ledger
 from . import similarity as SIM
 from .kanban_state import Board
-from .curve import parse_curve_account, buy_fill, sell_eff, flat_round_trip_pct, sol_price_usd
+from .curve import parse_curve_account, buy_fill, sell_eff, flat_round_trip_pct, size_for_curve_depth, sol_price_usd
 from .flow import (
     summarize, trade_from_tx, flow_allows, accelerating, flow_reversed,
     signal_strength, size_for_signal, with_last_window, last_window_allows,
@@ -53,7 +54,7 @@ STRAT = dict(
     flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
     flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50, flow_last_window_min_bs_ratio=1.3,
-    flow_max_round_trip_pct=50, impact_max_drag_pct=-10,
+    flow_max_round_trip_pct=50, impact_max_drag_pct=-10, impact_size_budget_pct=-4,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,
@@ -571,6 +572,16 @@ class Feed:
                 return self.skip(
                     key, f"curve impact {drag:.1f}% worse than {drag_limit:g}%", False, coin,
                 )
+        # The hard skip above used the intended size. Only a size that already
+        # cleared it can be cut, so a thin book is never resized into a pass.
+        intended = usd
+        usd = size_for_curve_depth(
+            intended, mcap or 1, sol_px, state.get("virtual_sol"), state.get("virtual_token"),
+            rules["curve_fee_bps"], budget_pct=float(rules["impact_size_budget_pct"]),
+            floor_usd=min(intended, float(rules["size_min"])),
+        )
+        if usd + 0.5 < intended:
+            sim_why += f", depth size ${usd:.0f} from ${intended:.0f}"
         filled = buy_fill(
             mcap or 1, usd, sol_px, state.get("virtual_sol"), state.get("virtual_token"), rules["curve_fee_bps"],
         )

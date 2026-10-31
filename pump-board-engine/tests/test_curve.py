@@ -11,6 +11,7 @@ from src.curve import (
     flat_round_trip_pct,
     parse_curve_account,
     sell_eff,
+    size_for_curve_depth,
     sol_price_usd,
 )
 
@@ -64,6 +65,28 @@ def test_flat_round_trip_is_none_until_the_curve_can_be_priced():
     deep = flat_round_trip_pct(30_000, 130, sol_price_usd(30_000, 40_000_000_000, 10**15), 40_000_000_000, 10**15, 100)
     assert drag is not None and deep is not None
     assert drag < -10 < deep < 0
+
+
+def test_size_for_curve_depth_cuts_only_the_expensive_dollars():
+    virtual_sol, virtual_token = 40_000_000_000, 10**15
+    # $8k: even $130 is past a -4% budget, so the cut stops at the floor.
+    thin_px = sol_price_usd(8_000, virtual_sol, virtual_token)
+    thin = size_for_curve_depth(240, 8_000, thin_px, virtual_sol, virtual_token, 100, budget_pct=-4, floor_usd=130)
+    assert thin == 130
+    # $15k: $160 misses -4% and $130 clears it, so the ticket shrinks inside the band.
+    mid_px = sol_price_usd(15_000, virtual_sol, virtual_token)
+    mid = size_for_curve_depth(160, 15_000, mid_px, virtual_sol, virtual_token, 100, budget_pct=-4, floor_usd=130)
+    assert 130 < mid < 160
+    assert flat_round_trip_pct(15_000, mid, mid_px, virtual_sol, virtual_token, 100) >= -4
+    assert flat_round_trip_pct(15_000, mid + 1, mid_px, virtual_sol, virtual_token, 100) < -4
+    # $60k and an unpriced book keep the requested size. The cut never raises it.
+    deep_px = sol_price_usd(60_000, virtual_sol, virtual_token)
+    assert size_for_curve_depth(160, 60_000, deep_px, virtual_sol, virtual_token, 100, budget_pct=-4, floor_usd=130) == 160
+    assert size_for_curve_depth(160, 8_000, 0, None, None, 100, budget_pct=-4, floor_usd=130) == 160
+    assert size_for_curve_depth(160, 8_000, thin_px, virtual_sol, virtual_token, 100, budget_pct=-100, floor_usd=130) == 160
+    full = 240 * (flat_round_trip_pct(8_000, 240, thin_px, virtual_sol, virtual_token, 100) or 0) / 100
+    cut = 130 * (flat_round_trip_pct(8_000, 130, thin_px, virtual_sol, virtual_token, 100) or 0) / 100
+    assert cut > full  # less negative. A flat spot loses fewer dollars at the floor.
 
 
 def test_missing_reserves_still_charge_the_fee():
