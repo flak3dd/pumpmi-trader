@@ -87,3 +87,7 @@ Reduced-motion preferences, keyboard navigation, inspection, live paper journal 
 Each authorized cycle pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. This workflow does not itself mean the deployment-dependent ten-minute timer is active.
 
 The managed dashboard is connected to the durable forward-paper optimizer. The separately available legacy `src.live_feed.Feed` implementation and its newly pulled v8 helper modules are preserved in this repository, but are a distinct runner. Active strategy telemetry reports the durable worker's actual limits rather than incorrectly advertising unused legacy thresholds. A future strategy integration must be validated against the active runner, not assumed from changes to another entry point.
+
+## Health check from Manus Preview
+
+Open this project's Preview and use `/health` on that same origin. The development proxy forwards it to the real API and returns JSON, just as production does. `http://127.0.0.1:3001/health` is a sandbox-local address; opening it in a browser on your Mac does not reach this cloud server. A healthy response is `{"ok":true,"optimizer":"requested"}`. This is liveness only, not proof of a profitable strategy or fresh market data.

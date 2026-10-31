@@ -80,3 +80,10 @@ The actual Preview proxy delivered a `text/event-stream` response with a verifie
 GitHub main was pulled at the start of the user's clarified cycle sequence; the concurrent `b993a4a` engine update was fast-forwarded in the GitHub checkout and all 14 non-overlapping engine files preserved in the managed source. The integrated engine suite passes 52 tests with one live credential-dependent test skipped. Live-only API contracts pass nine tests, optimizer contracts pass 23, and isolated stream/error handling passes. Active strategy telemetry uses the durable worker's actual numeric limits rather than silently claiming the separate legacy runner's thresholds are active.
 
 The final read-only review found two integration defects, both corrected and regression-tested: stream events/failures invalidate delayed bootstrap responses, and observed paths for actual holdings are labelled open paper positions rather than pending entries. The final UI checks and production build pass after these fixes.
+
+## Browser health-check access
+
+- [x] Expose the real API `/health` response through the primary Preview origin instead of Vite's SPA fallback, while retaining the running API and frontend services.
+- [x] Verify HTTP 200 JSON through the primary origin and explain that `127.0.0.1:3001` is sandbox-local, not a remotely accessible address on the user's Mac. Preserve the pull/update/fetch-merge/test/push sequence.
+
+The API was already listening on sandbox port 3001 and returned HTTP 200. The primary Preview `/health` path now proxies to that API and was verified as `application/json` with `ok:true`. No API restart or environment reset was required. The production TypeScript/Vite build passes.
