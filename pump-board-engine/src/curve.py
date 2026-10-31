@@ -8,6 +8,7 @@ not evidence of profitability.
 """
 from __future__ import annotations
 
+import base64
 import struct
 
 # Classic pump.fun curve constants. Token-side deltas on live accounts still match these.
@@ -41,6 +42,27 @@ def parse_curve_account(data: bytes) -> dict | None:
         "real_sol": int(real_sol),
         "curve_pct": round(curve_progress_pct(real_token), 2),
     }
+
+
+def curve_progress_from_account_data(data: bytes | str | list | None) -> float | None:
+    """Reserve progress from a base64 or raw account blob. None when it cannot be read.
+
+    A missing or truncated account is not market-cap / 69_000. Callers must skip
+    the entry rather than invent a curve percent.
+    """
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if isinstance(data, str):
+        try:
+            data = base64.b64decode(data)
+        except Exception:
+            return None
+    if not isinstance(data, (bytes, bytearray)):
+        return None
+    parsed = parse_curve_account(bytes(data))
+    if not parsed:
+        return None
+    return float(parsed["curve_pct"])
 
 
 def _fee_rate(fee_bps: float) -> float:

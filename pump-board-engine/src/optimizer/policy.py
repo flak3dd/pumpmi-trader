@@ -64,6 +64,9 @@ def position_size(equity: float, *, losing_streak: int = 0) -> float:
 def risk_reason(observation: dict[str, Any]) -> str | None:
     """Return a conservative gate failure without treating missing risk as zero."""
     market_cap = _finite_number(observation.get("market_cap")) or 0.0
+    # A failed reserve read stores a numeric placeholder. It must not enter.
+    if observation.get("curve_known") is False:
+        return "curve reserves unavailable"
     curve = _finite_number(observation.get("curve_pct")) or 0.0
     if not (RISK_LIMITS["min_curve_pct"] <= curve <= RISK_LIMITS["max_curve_pct"]):
         return "curve outside 25-85%"
@@ -343,7 +346,6 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
     entry = float(position["entry_mcap"])
     change = 100.0 * (current / entry - 1.0)
     age = float(observation["observed_at"]) - float(position["entry_at"])
-    curve = float(observation["curve_pct"])
     if change <= EXIT_RULES["stop_loss_pct"]:
         return (f"stop loss {change:.1f}%", 1.0)
     initial_dev = _finite_number((position.get("risk") or {}).get("dev_pct"))
@@ -351,8 +353,11 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
     current_dev = _finite_number(current_risk.get("dev_pct")) if current_risk.get("status") == "known" else None
     if initial_dev is not None and current_dev is not None and current_dev + 1e-9 < initial_dev:
         return (f"developer balance decreased {initial_dev:.2f}%→{current_dev:.2f}%", 1.0)
-    if curve >= EXIT_RULES["flatten_curve_pct"]:
-        return (f"flatten curve {curve:.1f}%", 1.0)
+    # Unknown reserves must not flatten. A placeholder 0% is not "through the curve".
+    if observation.get("curve_known") is not False:
+        curve = _finite_number(observation.get("curve_pct"))
+        if curve is not None and curve >= EXIT_RULES["flatten_curve_pct"]:
+            return (f"flatten curve {curve:.1f}%", 1.0)
     if not position.get("scaled") and change >= EXIT_RULES["scale_out_pct"]:
         return (f"scale half {change:.1f}%", 0.5)
     if position.get("scaled") and current < float(position["peak_mcap"]) * (1.0 - EXIT_RULES["trail_giveback_pct"] / 100.0):

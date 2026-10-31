@@ -61,7 +61,8 @@ def _flow(buyers=16):
     }
 
 
-SOLS = {1000.0: 5_000_000_000, 1090.0: 5_300_000_000, 1180.0: 5_700_000_000, 1300.0: 6_200_000_000}
+# 90s / 90s / 120s windows. Rates 0.002, 0.004, 0.006 SOL/s, so the rate gate still buys.
+SOLS = {1000.0: 5_000_000_000, 1090.0: 5_180_000_000, 1180.0: 5_540_000_000, 1300.0: 6_260_000_000}
 
 
 def _run_watch(feed, coin, now, curve=40.0):
@@ -275,3 +276,39 @@ def test_position_check_runs_before_the_scan(tmp_path: Path) -> None:
         order.clear()
         assert feed.cycle(now=1_005) is False
         assert order == ["positions", "write"]
+
+
+def test_fading_rate_on_the_saved_watch_does_not_buy(tmp_path: Path) -> None:
+    """30/180/1065 is the saved config. Absolute SOL rises; SOL per second does not."""
+    path = tmp_path / "strategy.json"
+    path.write_text(json.dumps({
+        "version": 1, "revision": 0, "max_open": 6,
+        "watchPeriods": {"short": 30, "medium": 180, "long": 1065},
+    }), encoding="utf-8")
+    now = [1000.0]
+    # +0.60 / 30s, +0.75 / 150s, +0.885 / 885s.
+    sols = {
+        1000.0: 5_000_000_000, 1030.0: 5_600_000_000,
+        1180.0: 6_350_000_000, 2065.0: 7_235_000_000,
+    }
+    coin = _coin(symbol="FADE", mint="fade-mint-0001")
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(coin)):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since: _flow(16)
+        feed.curve_state = lambda _coin: _state(40.0, sols.get(now[0], 5_000_000_000))
+        feed.evaluate(coin)
+        for stamp in (1030.0, 1180.0, 2065.0):
+            now[0] = stamp
+            feed.recheck()
+        assert not feed.pos
+        assert "SOL/s" in feed.ledger.skips[-1][1]
+        assert feed.ledger.fills == []

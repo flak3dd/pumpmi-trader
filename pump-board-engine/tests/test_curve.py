@@ -1,8 +1,12 @@
 import struct
 
+import base64
+import struct
+
 from src.curve import (
     INITIAL_REAL_TOKEN_RESERVES,
     buy_fill,
+    curve_progress_from_account_data,
     curve_progress_pct,
     parse_curve_account,
     sell_eff,
@@ -16,6 +20,16 @@ def test_progress_uses_real_token_reserves_not_mcap():
     sold = INITIAL_REAL_TOKEN_RESERVES - real
     assert abs(progress - 100 * sold / INITIAL_REAL_TOKEN_RESERVES) < 1e-9
     assert progress < 1  # a ~$2.6k coin is not ~4% of a $69k proxy
+
+
+def test_account_bytes_do_not_use_the_usd_proxy():
+    # ~$25k would be ~37% of a $69k proxy and inside the old band. Reserves say ~91%.
+    real_token = int(INITIAL_REAL_TOKEN_RESERVES * 0.085)
+    blob = b"\x00" * 8 + struct.pack("<QQQQ", 1_073_000_000_000_000, 30_000_000_000, real_token, 1)
+    progress = curve_progress_from_account_data(base64.b64encode(blob).decode())
+    assert progress is not None and progress > 90
+    assert curve_progress_from_account_data(None) is None
+    assert curve_progress_from_account_data("not-base64!!!") is None
 
 
 def test_parse_curve_account_reads_reserve_words():
