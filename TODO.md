@@ -61,3 +61,22 @@ Real-data operation was verified in the current Preview runtime: 49 public pump.
 Hourly report code is integrated into the active worker and preserves its database session across restarts, but a full real hour has not completed yet. Reserved hosting confirmation/publication and the rejected ten-minute agent schedule remain unresolved rather than falsely marked active.
 
 The tested live-market paper optimizer source was pushed successfully to GitHub `main`, commit `4842ccd`, on 2026-10-31 at 19:06 AEDT. The managed website has not been published, and neither paid always-on hosting nor the ten-minute schedule is confirmed active.
+
+## Replace snapshots with the running live feed
+
+- [x] The dashboard consumes only the running market-data paper engine. No saved board/trade file or `/data/snapshot.json` fallback is loaded by normal browsing. Worker or network failures show awaiting/disconnected/stale states instead of reverting to historical data.
+- [x] Replace snapshot/restore/fixture controls and instructional wording in the normal dashboard with automatic live-feed connection, live paper-trade history, and display-pause/reconnect controls. Offline fixture endpoints remain isolated test tools, never a substitute for live trading.
+- [x] Provide a running server event stream plus live-feed bootstrap endpoint, with current quote provenance, honest risk/entry status, and live watched-token market-cap paths without fabricated BUY/SELL executions or realized P&L. Preserve user strategy settings, paper-only execution, and the six-position cap.
+- [x] Verify no historical fallback requests, a live event stream, safe outage states, live chart/journal semantics, unchanged recorded source files, and the existing engine behavior before updating GitHub main and the managed source version.
+
+## Per-cycle GitHub integration order
+
+For every authorized improvement cycle: first pull/integrate the latest GitHub `main`, then implement and test the intended changes, fetch `main` again immediately before delivery, merge any intervening remote changes while preserving both sides, rerun affected checks, and push the integrated result to `main`. Never force-push, overwrite independent edits, or silently stash unfinished work. The requested recurring timer remains uncreated until its deployment prerequisite is satisfied; this sequence applies to the current update and future authorized cycles.
+
+### Live-feed replacement evidence
+
+The actual Preview proxy delivered a `text/event-stream` response with a verified-live `feed` frame, 64 watched-market charts, and zero execution charts. The dashboard validates and consumes these events. DOM checks pass for streaming updates, explicit disconnect/stale retention, no historical/simulation endpoint requests, market-watch exclusion from trade counts/journal, and the existing sliders/settings. The public snapshot asset is removed; its bytes are retained only as an explicit isolated test seed under `scripts/fixtures/`.
+
+GitHub main was pulled at the start of the user's clarified cycle sequence; the concurrent `b993a4a` engine update was fast-forwarded in the GitHub checkout and all 14 non-overlapping engine files preserved in the managed source. The integrated engine suite passes 52 tests with one live credential-dependent test skipped. Live-only API contracts pass nine tests, optimizer contracts pass 23, and isolated stream/error handling passes. Active strategy telemetry uses the durable worker's actual numeric limits rather than silently claiming the separate legacy runner's thresholds are active.
+
+The final read-only review found two integration defects, both corrected and regression-tested: stream events/failures invalidate delayed bootstrap responses, and observed paths for actual holdings are labelled open paper positions rather than pending entries. The final UI checks and production build pass after these fixes.

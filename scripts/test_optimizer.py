@@ -205,6 +205,20 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(payload["board"]["ts"], 62)
         self.assertGreaterEqual(payload["board"]["stats"]["observations"], 2)
 
+    def test_live_watch_path_contains_prices_not_fake_executions(self) -> None:
+        runtime = self.runtime(MockSource([[known_observation("WATCH", 0, 25_000)]]))
+        self.own_lease(runtime, 0)
+        runtime.tick(now=1)
+        frame = runtime.snapshot_payload(now=1)
+        self.assertTrue(frame["trades"])
+        watch = next(iter(frame["trades"].values()))
+        self.assertTrue(watch["isMarketWatch"])
+        self.assertEqual(watch["signals"], [])
+        self.assertEqual(watch["entry"], 0)
+        self.assertEqual(watch["series"][0]["value"], 25_000)
+        self.assertEqual(frame["board"]["stats"]["buys"], 0)
+        self.assertFalse(watch["gatesBuy"][-1]["pass"])
+
     def test_unverified_and_failed_source_are_not_advertised_fresh(self) -> None:
         runtime = self.runtime(MockSource([[known_observation("LIVE", 0, 25_000)]]))
         waiting = runtime.snapshot_payload(now=0)

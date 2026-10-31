@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
@@ -54,16 +54,35 @@ class ApiContractTests(unittest.TestCase):
         self.assertEqual(int(status), 200)
         self.assertEqual(payload, {"ok": True})
 
-    def test_snapshot_endpoint_wraps_raw_datasets(self) -> None:
-        status, payload = self.dispatch("GET", "/api/snapshot")
+    def test_live_feed_without_worker_never_reads_saved_files(self) -> None:
+        for route in ("/api/live-feed", "/api/snapshot"):
+            with patch.object(serve, "_read_json", side_effect=AssertionError("saved snapshot was loaded")):
+                with self.assertRaises(serve.ApiError) as caught:
+                    self.dispatch("GET", route)
+            self.assertEqual(int(caught.exception.status), 503)
+            self.assertIn("No historical fallback", caught.exception.message)
+
+    def test_live_feed_returns_only_enabled_runtime_frames(self) -> None:
+        runtime = Mock(enabled=True)
+        runtime.snapshot_payload.return_value = {
+            "board": {"ts": 1, "columns": {"checking": [], "holding": [], "done": []}}, "trades": {},
+            "meta": {"kind": "awaiting", "label": "Awaiting live prices", "simulationAvailable": True}}
+        with patch.object(serve, "_runtime_for_payload", return_value=runtime), patch.object(serve, "strategy_payload", return_value={"revision":7}), patch.object(serve, "_read_json", side_effect=AssertionError("saved data loaded")):
+            status, frame = self.dispatch("GET", "/api/live-feed")
         self.assertEqual(int(status), 200)
-        self.assertEqual(payload["board"], json.loads(RAW_DATASETS[0].read_text(encoding="utf-8")))
-        self.assertEqual(payload["trades"], json.loads(RAW_DATASETS[1].read_text(encoding="utf-8")))
-        self.assertEqual(payload["meta"]["kind"], "snapshot")
-        self.assertEqual(payload["meta"]["label"], "Recorded market snapshot · paper trades")
-        self.assertTrue(payload["meta"]["simulationAvailable"])
-        self.assertEqual(payload["meta"]["updated"], payload["board"].get("updated"))
-        self.assertEqual(payload["strategyConfig"]["watchPeriods"], self.initial_periods)
+        self.assertEqual(frame["meta"]["kind"], "awaiting")
+        self.assertEqual(frame["meta"]["transport"], "server-sent-events")
+        self.assertFalse(frame["meta"]["simulationAvailable"])
+
+    def test_active_strategy_reports_actual_durable_limits(self) -> None:
+        runtime = Mock(enabled=True)
+        runtime.config.return_value = self.initial_document
+        with patch.object(serve, "_runtime_for_payload", return_value=runtime):
+            values = serve.strategy_payload(self.strategy_path)
+        from src.optimizer.policy import RISK_LIMITS
+        self.assertEqual(values["strategy"]["min_curve_pct"], RISK_LIMITS["min_curve_pct"])
+        self.assertEqual(values["strategy"]["max_open"], 6)
+        self.assertEqual(values["watchPeriods"], self.initial_periods)
 
     def test_strategy_endpoint_is_paper_only_and_exact(self) -> None:
         status, payload = self.dispatch("GET", "/api/strategy")
@@ -120,14 +139,15 @@ class ApiContractTests(unittest.TestCase):
         try:
             with patch.object(serve, "optimizer_runtime", side_effect=AssertionError("injected API test touched optimizer DB")):
                 strategy = serve.strategy_payload(self.strategy_path)
-                snapshot = serve.snapshot_payload(strategy_config_path=self.strategy_path)
+                with self.assertRaises(serve.ApiError) as unavailable:
+                    serve.live_feed_payload(strategy_config_path=self.strategy_path)
+                self.assertEqual(int(unavailable.exception.status), 503)
                 updated = serve.update_strategy_payload(
                     {"watchPeriods": {"short": 120, "medium": 240, "long": 360}, "revision": self.initial_revision},
                     self.strategy_path,
                 )
                 simulation = serve.simulate_payload(self.strategy_path)
             self.assertEqual(strategy["revision"], self.initial_revision)
-            self.assertEqual(snapshot["strategyConfig"]["revision"], self.initial_revision)
             self.assertEqual(updated["revision"], self.initial_revision + 1)
             self.assertEqual(simulation["strategyConfig"]["revision"], self.initial_revision + 1)
         finally:

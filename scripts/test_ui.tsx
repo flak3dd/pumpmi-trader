@@ -25,26 +25,15 @@ Object.defineProperty(globalThis, "navigator", {
   value: dom.window.navigator,
 });
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** The checked-in data is an explicit software-test seed, never a UI fallback. */
 const recorded = JSON.parse(
   readFileSync(
-    new URL("../public/data/snapshot.json", import.meta.url),
+    new URL("./fixtures/recorded-test-seed.json", import.meta.url),
     "utf8",
   ),
 );
-recorded.meta.simulationAvailable = true;
-const nativeFetch = globalThis.fetch;
-const fixtureResponse = await nativeFetch(
-  "http://127.0.0.1:3001/api/simulate",
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}",
-  },
-);
-const fixture = await fixtureResponse.json();
-assert.equal(fixture.meta.kind, "fixture");
-const requests: string[] = [];
-let strategyState = {
+const strategyState = {
   strategy: {
     min_curve_pct: 25,
     max_curve_pct: 85,
@@ -57,12 +46,90 @@ let strategyState = {
     scale_out_pct: 25,
     trail_giveback_pct: 12,
   },
-  watchPeriods: { short: 90, medium: 180, long: 300 },
-  revision: 0,
+  watchPeriods: { short: 30, medium: 180, long: 1065 },
+  revision: 7,
   editable: true,
   paperOnly: true,
 };
+const watchSymbol = "WATCHPATH·LIVE";
+const liveFrame = structuredClone(recorded);
+liveFrame.meta = {
+  kind: "live",
+  label: "Software-test live feed",
+  updated: "2026-10-31T08:00:00.000Z",
+};
+liveFrame.strategyConfig = structuredClone(strategyState);
+liveFrame.board.ts = 1_793_428_800;
+liveFrame.board.updated = "2026-10-31T08:00:00.000Z";
+liveFrame.board.columns.checking.push({
+  symbol: watchSymbol,
+  name: "Watched Market Path",
+  column: "checking",
+  verdict: "WATCH",
+  reason: "Actual risk checkpoints are pending.",
+  mcap: 125000,
+  curve_pct: 44,
+  ts_seen: 1_793_427_700,
+  watch_started_ts: 1_793_427_700,
+  watch_periods: {
+    short: { duration_s: 30, elapsed_s: 30, status: "observed" },
+    medium: { duration_s: 180, elapsed_s: 90, status: "watching" },
+    long: { duration_s: 1065, elapsed_s: 90, status: "watching" },
+  },
+});
+liveFrame.trades[watchSymbol] = {
+  metric: "market_cap",
+  series: [
+    { label: "08:00", value: 118000 },
+    { label: "08:01", value: 121500 },
+    { label: "08:02", value: 125000 },
+  ],
+  signals: [],
+  gatesBuy: [
+    { name: "Holder risk", detail: "RPC observation pending", pass: null },
+    { name: "Long watch", detail: "90s of 1065s observed", pass: null },
+  ],
+  gatesSell: [],
+  entry: 0,
+  exitPnl: 0,
+  exitPp: 0,
+  dur: 2,
+  isMarketWatch: true,
+};
+
+class MockEventSource {
+  static instances: MockEventSource[] = [];
+  readonly listeners = new Map<string, Set<(event: Event) => void>>();
+  onerror: ((event: Event) => void) | null = null;
+  closed = false;
+  constructor(readonly url: string) {
+    MockEventSource.instances.push(this);
+  }
+  addEventListener(type: string, listener: (event: Event) => void) {
+    const listeners = this.listeners.get(type) || new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+  close() {
+    this.closed = true;
+  }
+  emitFeed(payload: unknown) {
+    const event = {
+      type: "feed",
+      data: JSON.stringify(payload),
+    } as MessageEvent;
+    this.listeners.get("feed")?.forEach((listener) => listener(event));
+  }
+  emitError() {
+    this.onerror?.(new Event("error"));
+  }
+}
+(window as any).EventSource = MockEventSource;
+(globalThis as any).EventSource = MockEventSource;
+
 let failNextSave = false;
+let deferredBootstrap: Promise<Response> | null = null;
+const requests: string[] = [];
 const optimizerStatus = {
   enabled: true,
   runtime: "running",
@@ -82,8 +149,8 @@ const optimizerStatus = {
     social: "unavailable",
   },
   champion: {
-    watchPeriods: { short: 90, medium: 180, long: 300 },
-    revision: 0,
+    watchPeriods: { short: 30, medium: 180, long: 1065 },
+    revision: 7,
   },
   portfolio: {
     equity: 1500,
@@ -125,12 +192,9 @@ const optimizerStatus = {
 };
 (globalThis as any).fetch = async (url: string, options?: RequestInit) => {
   requests.push(`${options?.method || "GET"} ${url}`);
+  if (url === "/api/live-feed")
+    return deferredBootstrap || Response.json(structuredClone(liveFrame));
   if (url === "/api/optimizer") return Response.json(optimizerStatus);
-  if (url === "/api/snapshot") return Response.json(recorded);
-  if (url === "/api/simulate") {
-    assert.equal(options?.body, "{}");
-    return Response.json(fixture);
-  }
   if (url === "/api/strategy" && options?.method === "PUT") {
     if (failNextSave) {
       failNextSave = false;
@@ -142,16 +206,15 @@ const optimizerStatus = {
     const body = JSON.parse(String(options.body));
     assert.equal(body.revision, strategyState.revision);
     assert.deepEqual(Object.keys(body).sort(), ["revision", "watchPeriods"]);
-    strategyState = {
-      ...strategyState,
-      watchPeriods: body.watchPeriods,
-      revision: strategyState.revision + 1,
-    };
-    return Response.json(strategyState);
+    strategyState.watchPeriods = body.watchPeriods;
+    strategyState.revision += 1;
+    return Response.json(structuredClone(strategyState));
   }
-  if (url === "/api/strategy") return Response.json(strategyState);
+  if (url === "/api/strategy")
+    return Response.json(structuredClone(strategyState));
   throw new Error(`Unexpected endpoint ${url}`);
 };
+
 const React = await import("react");
 const { render, screen, within, waitFor, cleanup, fireEvent, act } =
   await import("@testing-library/react");
@@ -159,7 +222,7 @@ const userEvent = (await import("@testing-library/user-event")).default;
 const App = (await import("../src/App")).default;
 const user = userEvent.setup({ document: dom.window.document });
 const result = render(React.createElement(App));
-await screen.findByText("RECORDED SNAPSHOT");
+await screen.findByText("LIVE FEED · VERIFIED");
 await screen.findByText("Config saved");
 await screen.findByText("Collecting market data");
 assert.ok(screen.getByText("Waiting for evidence"));
@@ -175,6 +238,14 @@ assert.equal(
 );
 for (const card of result.container.querySelectorAll(".token-card"))
   assert.equal(card.querySelectorAll(".token-watch-tier").length, 3);
+assert.ok(
+  [
+    ...result.container.querySelectorAll(".board-lane.checking .token-card"),
+  ].some((card) => card.textContent?.includes("WATCHPATH")),
+);
+assert.equal(MockEventSource.instances.length, 1);
+assert.equal(MockEventSource.instances[0].url, "/api/live-feed/events");
+
 const shortSlider = screen.getByRole("slider", {
   name: "Short watch period",
 }) as HTMLInputElement;
@@ -184,19 +255,22 @@ const mediumSlider = screen.getByRole("slider", {
 const longSlider = screen.getByRole("slider", {
   name: "Long watch period",
 }) as HTMLInputElement;
+assert.equal(shortSlider.value, "30");
+assert.equal(mediumSlider.value, "180");
+assert.equal(longSlider.value, "1065");
 fireEvent.change(shortSlider, { target: { value: "105" } });
 fireEvent.change(mediumSlider, { target: { value: "240" } });
-fireEvent.change(longSlider, { target: { value: "420" } });
+fireEvent.change(longSlider, { target: { value: "1200" } });
 await waitFor(() =>
   assert.deepEqual(strategyState.watchPeriods, {
     short: 105,
     medium: 240,
-    long: 420,
+    long: 1200,
   }),
 );
 await screen.findByText("Config saved");
 assert.equal(
-  requests.filter((r) => r === "PUT /api/strategy").length,
+  requests.filter((request) => request === "PUT /api/strategy").length,
   1,
   "rapid slider moves should debounce into one update",
 );
@@ -225,13 +299,26 @@ await screen.findByText("Config saved");
 assert.ok(screen.getByText("$1,108.36"));
 assert.equal(
   result.container.querySelectorAll(".board-lane.checking .token-card").length,
-  2,
+  3,
 );
 assert.equal(
   result.container.querySelectorAll(".board-lane.holding .token-card").length,
   0,
 );
 assert.ok(result.container.querySelector(".board-lane.holding .lane-empty"));
+const watchCard = [
+  ...result.container.querySelectorAll(".board-lane.checking .token-card"),
+].find((card) => card.textContent?.includes("WATCHPATH")) as HTMLElement;
+assert.ok(watchCard.textContent?.includes("Unknown"));
+await user.click(watchCard);
+let dialog = screen.getByRole("dialog", { name: "Signal inspection" });
+assert.ok(within(dialog).getByText("LIVE MARKET PATH"));
+assert.equal(within(dialog).getAllByText("Checking / unknown").length, 2);
+assert.ok(within(dialog).getByText("Current market quote"));
+assert.equal(within(dialog).queryByText("Total trade P&L"), null);
+assert.equal(within(dialog).queryByText("Flat"), null);
+await user.keyboard("{Escape}");
+
 const firstClosedCard = result.container.querySelector(
   ".board-lane.done .token-card",
 ) as HTMLElement;
@@ -241,26 +328,31 @@ assert.ok(
   "trade return must come from all ledger legs",
 );
 await user.click(firstClosedCard);
-let dialog = screen.getByRole("dialog", { name: "Signal inspection" });
+dialog = screen.getByRole("dialog", { name: "Signal inspection" });
 assert.ok(within(dialog).getByText("$43.16"));
 assert.ok(within(dialog).getByText(/Latest board decision/));
-assert.equal(within(dialog).getAllByText("Unknown").length, 3);
 assert.equal(dialog.querySelectorAll(".token-watch-tier").length, 3);
 await user.keyboard("{Escape}");
-assert.equal(screen.queryByRole("dialog"), null);
 await user.click(screen.getByRole("button", { name: "Show all done signals" }));
 await user.click(screen.getByRole("button", { name: /View all .* signals/ }));
 const ghost = [
   ...result.container.querySelectorAll(".board-lane.done .token-card"),
-].find((e) => e.textContent?.includes("GHOSTY"));
+].find((element) => element.textContent?.includes("GHOSTY"));
 assert.ok(
   ghost?.querySelector(".token-tag")?.textContent === "SKIPPED",
   "skip decisions must not be relabeled closed",
 );
+
 await user.click(screen.getByRole("button", { name: "Trade journal" }));
 assert.equal(
   result.container.querySelectorAll("tbody tr").length,
-  Object.keys(recorded.trades).length,
+  Object.values(liveFrame.trades).filter((trade: any) => !trade.isMarketWatch)
+    .length,
+);
+assert.equal(
+  screen.queryByText("WATCHPATH"),
+  null,
+  "watch paths stay out of the journal",
 );
 await user.selectOptions(
   screen.getByRole("combobox", { name: "Filter trade outcome" }),
@@ -268,10 +360,12 @@ await user.selectOptions(
 );
 assert.equal(
   result.container.querySelectorAll("tbody tr").length,
-  Object.values(recorded.trades).filter((t: any) => t.exitPnl < 0).length,
+  Object.values(liveFrame.trades).filter(
+    (trade: any) => !trade.isMarketWatch && trade.exitPnl < 0,
+  ).length,
 );
 await user.type(
-  screen.getByRole("textbox", { name: "Search recorded trades" }),
+  screen.getByRole("textbox", { name: "Search live paper trades" }),
   "MARSCOIN",
 );
 assert.equal(result.container.querySelectorAll("tbody tr").length, 1);
@@ -286,15 +380,120 @@ await user.click(motionSwitch);
 assert.equal(motionSwitch.getAttribute("aria-checked"), "false");
 assert.ok(result.container.querySelector(".motion-off"));
 await user.keyboard("{Escape}");
+
 await user.click(screen.getByRole("button", { name: /^Terminal$/ }));
-await user.click(screen.getByRole("button", { name: /Run paper simulation/ }));
-await screen.findByText("FIXTURE SIMULATION");
-assert.ok(requests.includes("POST /api/simulate"));
-assert.ok(screen.getAllByText("Fixture unit price").length > 0);
-await user.click(screen.getByRole("button", { name: "Return to snapshot" }));
-await screen.findByText("RECORDED SNAPSHOT");
-assert.ok(screen.getByText("$1,108.36"));
+const updatedFrame = structuredClone(liveFrame);
+updatedFrame.board.updated = "2026-10-31T08:05:00.000Z";
+updatedFrame.trades[watchSymbol].series.push({ label: "08:05", value: 131000 });
+updatedFrame.board.columns.checking.find(
+  (token: any) => token.symbol === watchSymbol,
+).mcap = 131000;
+await act(async () => MockEventSource.instances[0].emitFeed(updatedFrame));
+await screen.findAllByText("$131K");
+const requestsBeforeDisconnect = [...requests];
+await act(async () => MockEventSource.instances[0].emitError());
+await screen.findByText("LIVE FEED DISCONNECTED");
+assert.ok(screen.getByText(/Live feed disconnected/));
+assert.deepEqual(
+  requests,
+  requestsBeforeDisconnect,
+  "a stream disconnect must retain the live frame rather than load history",
+);
+assert.ok(
+  !requests.some(
+    (request) =>
+      request.includes("/data/snapshot.json") ||
+      request.includes("/api/snapshot") ||
+      request.includes("/api/simulate"),
+  ),
+  "normal UI may only use the live feed, optimizer, and strategy endpoints",
+);
+await user.click(
+  result.container.querySelector(
+    ".page-actions .button.secondary",
+  ) as HTMLElement,
+);
+await screen.findByText("LIVE FEED · VERIFIED");
+
+// A live holding's observed path is not an unexecuted/pending-entry position.
+const holdingFrame = structuredClone(liveFrame);
+const holdingToken = holdingFrame.board.columns.checking.find(
+  (token: any) => token.symbol === watchSymbol,
+);
+holdingFrame.board.columns.checking =
+  holdingFrame.board.columns.checking.filter(
+    (token: any) => token.symbol !== watchSymbol,
+  );
+holdingFrame.board.columns.holding.push({
+  ...holdingToken,
+  column: "holding",
+  verdict: "BUY",
+  pnl: 5,
+  pnl_pct: 1,
+});
+const resumedStream = MockEventSource.instances.at(-1)!;
+await act(async () => resumedStream.emitFeed(holdingFrame));
+await user.click(
+  [
+    ...result.container.querySelectorAll(".board-lane.holding .token-card"),
+  ].find((card) => card.textContent?.includes("WATCHPATH")) as HTMLElement,
+);
+assert.ok(screen.getByText("Open position watch context"));
+assert.ok(screen.getByText(/observed market-cap path · open paper position/));
+await user.keyboard("{Escape}");
+
+// SSE wins over an older deferred JSON bootstrap, even if fetch ignores abort.
+let resolveDeferred!: (response: Response) => void;
+deferredBootstrap = new Promise<Response>((resolve) => {
+  resolveDeferred = resolve;
+});
+await user.click(
+  result.container.querySelector(
+    ".page-actions .button.secondary",
+  ) as HTMLElement,
+);
+await act(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+const racingStream = MockEventSource.instances.at(-1)!;
+await act(async () => racingStream.emitFeed(updatedFrame));
+await screen.findAllByText("$131K");
+await act(async () =>
+  resolveDeferred(Response.json(structuredClone(liveFrame))),
+);
+assert.ok(
+  screen.getAllByText("$131K").length > 0,
+  "a delayed JSON response must not replace a newer live event",
+);
+
+// A failed stream invalidates its outstanding bootstrap and retains disconnect.
+deferredBootstrap = new Promise<Response>((resolve) => {
+  resolveDeferred = resolve;
+});
+await user.click(
+  result.container.querySelector(
+    ".page-actions .button.secondary",
+  ) as HTMLElement,
+);
+await act(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
+await act(async () => MockEventSource.instances.at(-1)!.emitError());
+await screen.findByText("LIVE FEED DISCONNECTED");
+await act(async () =>
+  resolveDeferred(Response.json(structuredClone(liveFrame))),
+);
+assert.ok(
+  screen.getByText("LIVE FEED DISCONNECTED"),
+  "a late bootstrap must not clear a stream failure",
+);
+deferredBootstrap = null;
+assert.ok(
+  requests.filter((request) => request === "GET /api/live-feed").length >= 2,
+  "manual reconnect must bootstrap the current live feed",
+);
 cleanup();
+
 const TokenWatchPeriods = (await import("../src/components/TokenWatchPeriods"))
   .default;
 const watchView = render(
@@ -334,6 +533,7 @@ assert.equal(
   `${((1090 - 1000) / 180) * 100}%`,
 );
 cleanup();
+
 const baseFetch = globalThis.fetch;
 const staleConfig = structuredClone(strategyState);
 let strategyReads = 0;
@@ -367,6 +567,7 @@ assert.equal(
   "stale StrictMode load must never overwrite a newer slider save",
 );
 cleanup();
+
 const useStrategyConfig = (await import("../src/lib/useStrategyConfig"))
   .default;
 const { renderHook } = await import("@testing-library/react");
@@ -375,7 +576,7 @@ await waitFor(() => assert.equal(configHook.result.current.status, "saved"));
 const promoted = {
   ...strategyState,
   revision: strategyState.revision + 1,
-  watchPeriods: { short: 135, medium: 255, long: 435 },
+  watchPeriods: { short: 135, medium: 255, long: 1215 },
 };
 act(() => configHook.result.current.adoptConfig(promoted));
 assert.equal(
@@ -388,7 +589,7 @@ act(() =>
   configHook.result.current.adoptConfig({
     ...promoted,
     revision: promoted.revision + 1,
-    watchPeriods: { short: 90, medium: 240, long: 420 },
+    watchPeriods: { short: 90, medium: 240, long: 1200 },
   }),
 );
 assert.equal(
@@ -398,5 +599,5 @@ assert.equal(
 );
 configHook.unmount();
 console.log(
-  "UI checks passed: 3 token timeframes, 6 slots, debounced config sliders, failed-save retry, snapshot, lanes, consistent ledger returns, skip verdicts, detail, journal search/filter, strategy, preferences, simulation, and snapshot restoration.",
+  "UI checks passed: live bootstrap and EventSource feed, no historical fallback, disconnected stale frame, market-watch paths, 3 timeframes, 6 slots, debounced config sliders, failed-save retry, StrictMode stale-load protection, journal filtering, preferences, and live paper execution semantics.",
 );

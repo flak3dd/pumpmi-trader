@@ -21,16 +21,17 @@ export default function TradeChart({
     return (
       <div className="chart-empty">
         <Activity size={30} />
-        <strong>No recorded price series</strong>
-        <span>This asset has no completed trade chart yet.</span>
+        <strong>No live market path or paper execution series</strong>
+        <span>This asset has no sampled path yet.</span>
       </div>
     );
+  const isMarketWatch = trade.isMarketWatch === true;
   const width = 900,
     height = compactMode ? 180 : 260;
   const pad = { left: 12, right: 68, top: 30, bottom: 32 };
   const values = trade.series.map((p) => p.value);
-  const rawMin = Math.min(...values, trade.entry),
-    rawMax = Math.max(...values, trade.entry);
+  const rawMin = Math.min(...values, ...(isMarketWatch ? [] : [trade.entry]));
+  const rawMax = Math.max(...values, ...(isMarketWatch ? [] : [trade.entry]));
   const range = Math.max(
     rawMax - rawMin,
     rawMax * 0.06,
@@ -54,6 +55,7 @@ export default function TradeChart({
       ? undefined
       : trade.signals.find((s) => s.at === safeHover);
   const lastValue = values[values.length - 1];
+  const pathName = isMarketWatch ? "live market path" : "paper execution path";
   return (
     <div className={`trade-chart ${compactMode ? "compact-chart" : ""}`}>
       {active && (
@@ -73,7 +75,11 @@ export default function TradeChart({
       <svg
         viewBox={`0 0 ${width} ${height}`}
         role="img"
-        aria-label={`${symbol || "Trade"} recorded ${chartMetric(trade).toLowerCase()} chart. Entry ${chartNumber(trade.entry, trade)}, final ${chartNumber(lastValue, trade)}.`}
+        aria-label={
+          isMarketWatch
+            ? `${symbol || "Asset"} live market path. Current ${chartNumber(lastValue, trade)}. Observed quotes; paper executions are shown separately.`
+            : `${symbol || "Trade"} paper execution path. Entry ${chartNumber(trade.entry, trade)}, final ${chartNumber(lastValue, trade)}.`
+        }
         onMouseLeave={() => setHover(null)}
       >
         <defs>
@@ -117,16 +123,24 @@ export default function TradeChart({
           />
         ))}
         <path d={fill} fill={`url(#fill-${id})`} />
-        <line
-          x1={pad.left}
-          x2={width - pad.right}
-          y1={y(trade.entry)}
-          y2={y(trade.entry)}
-          className="entry-line"
-        />
-        <text x={pad.left + 6} y={y(trade.entry) - 7} className="entry-label">
-          ENTRY {chartNumber(trade.entry, trade)}
-        </text>
+        {!isMarketWatch && (
+          <>
+            <line
+              x1={pad.left}
+              x2={width - pad.right}
+              y1={y(trade.entry)}
+              y2={y(trade.entry)}
+              className="entry-line"
+            />
+            <text
+              x={pad.left + 6}
+              y={y(trade.entry) - 7}
+              className="entry-label"
+            >
+              ENTRY {chartNumber(trade.entry, trade)}
+            </text>
+          </>
+        )}
         <path
           d={line}
           fill="none"
@@ -144,6 +158,7 @@ export default function TradeChart({
           className="chart-price-line"
         />
         {showSignals &&
+          !isMarketWatch &&
           trade.signals.map((s) => (
             <g key={s.id} className={`chart-signal ${s.kind}`}>
               <line
@@ -222,7 +237,7 @@ export default function TradeChart({
             height={height}
             fill="transparent"
             tabIndex={0}
-            aria-label={`Point ${i + 1}: ${chartNumber(values[i], trade)}`}
+            aria-label={`${pathName} point ${i + 1}: ${chartNumber(values[i], trade)}`}
             onMouseEnter={() => setHover(i)}
             onFocus={() => setHover(i)}
             onBlur={() => setHover(null)}

@@ -9,9 +9,9 @@ export type StrategyConfig = {
   paperOnly: boolean;
 };
 export const DEFAULT_WATCH_PERIODS: WatchPeriods = {
-  short: 90,
+  short: 30,
   medium: 180,
-  long: 300,
+  long: 1065,
 };
 export const WATCH_TIERS: { key: WatchTier; label: string; code: string }[] = [
   { key: "short", label: "Short", code: "S" },
@@ -69,18 +69,27 @@ export type Signal = {
   reason: string;
   rule?: string | null;
 };
+export type RiskGate = {
+  name: string;
+  detail: string;
+  /** null/omitted is intentionally unresolved rather than a passed gate. */
+  pass?: boolean | null;
+};
 export type Trade = {
   metric?: "unit_price" | "market_cap";
   series: { label: string; value: number }[];
   signals: Signal[];
-  gatesBuy: { name: string; detail: string; pass: boolean }[];
-  gatesSell: { name: string; detail: string; pass: boolean }[];
+  gatesBuy: RiskGate[];
+  gatesSell: RiskGate[];
   entry: number;
   exitPnl: number;
   exitPp: number;
   dur: number;
   _exitTs?: number;
+  /** A live observed quote path; it is not a paper execution or closed trade. */
+  isMarketWatch?: boolean;
 };
+export type LiveFeedKind = "live" | "awaiting" | "stale";
 export type Snapshot = {
   strategyConfig?: StrategyConfig;
   board: {
@@ -105,10 +114,9 @@ export type Snapshot = {
   };
   trades: Record<string, Trade>;
   meta: {
-    kind: "snapshot" | "fixture" | "live" | "awaiting" | "stale";
+    kind: LiveFeedKind;
     label: string;
     updated?: string;
-    simulationAvailable: boolean;
   };
 };
 export const money = (n: number | null | undefined, digits = 2) =>
@@ -157,20 +165,81 @@ export const avatarColor = (symbol: string) =>
     Array.from(symbol).reduce((v, c) => v + c.charCodeAt(0), 0) %
       AVATAR_COLORS.length
   ];
-export async function loadSnapshot(): Promise<Snapshot> {
+
+type JsonRecord = Record<string, unknown>;
+const isRecord = (value: unknown): value is JsonRecord =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const isLiveFeedKind = (value: unknown): value is LiveFeedKind =>
+  value === "live" || value === "awaiting" || value === "stale";
+
+/**
+ * Validates both the JSON bootstrap response and EventSource payloads. Frames
+ * from historical snapshot/fixture sources deliberately fail this boundary.
+ */
+export function validateLiveFeed(value: unknown): Snapshot {
+  if (!isRecord(value) || !isRecord(value.meta) || !isRecord(value.board))
+    throw new Error("Live feed returned malformed data.");
+  if (!isLiveFeedKind(value.meta.kind) || typeof value.meta.label !== "string")
+    throw new Error("Live feed returned an unsupported frame kind.");
+  if (!isRecord(value.trades) || !isRecord(value.board.columns))
+    throw new Error("Live feed returned malformed board data.");
+  const columns = value.board.columns;
+  if (
+    !Array.isArray(columns.checking) ||
+    !Array.isArray(columns.holding) ||
+    !Array.isArray(columns.done)
+  )
+    throw new Error("Live feed returned incomplete board lanes.");
+  if (
+    (value.board.ts !== null && typeof value.board.ts !== "number") ||
+    typeof value.board.bankroll !== "number" ||
+    typeof value.board.equity !== "number"
+  )
+    throw new Error("Live feed returned invalid market metadata.");
+  return value as Snapshot;
+}
+
+export async function loadLiveFeed({
+  signal,
+}: {
+  signal?: AbortSignal;
+} = {}): Promise<Snapshot> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, 20_000);
+  const abortFromCaller = () => controller.abort();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
-    if (response.ok && response.headers.get("content-type")?.includes("json"))
-      return await response.json();
-  } catch {
-    /* Static deployments expose the same truthful snapshot without simulation. */
+    const response = await fetch("/api/live-feed", {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let message = `Live feed unavailable (${response.status}).`;
+      try {
+        const body = await response.json();
+        if (isRecord(body) && typeof body.error === "string") message = body.error;
+      } catch {
+        /* A non-JSON error response is still an unavailable live feed. */
+      }
+      throw new Error(message);
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error("Live feed returned malformed JSON.");
+    }
+    return validateLiveFeed(payload);
+  } catch (error) {
+    if (timedOut)
+      throw new Error("Live feed request timed out after 20 seconds.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
-  const response = await fetch("/data/snapshot.json", { cache: "no-store" });
-  if (!response.ok)
-    throw new Error(
-      "Snapshot unavailable. Check the paper-engine adapter and try again.",
-    );
-  const snapshot = (await response.json()) as Snapshot;
-  snapshot.meta.simulationAvailable = false;
-  return snapshot;
 }

@@ -54,12 +54,13 @@ import {
   chartNumber,
   compact,
   identifier,
-  loadSnapshot,
+  loadLiveFeed,
   money,
   pct,
   shortSymbol,
   signed,
   tokenForTrade,
+  validateLiveFeed,
   type Lane,
   type Snapshot,
   type Token,
@@ -69,6 +70,13 @@ import {
 } from "./lib/data";
 
 type View = "terminal" | "journal" | "strategy";
+type FeedConnection =
+  | "connecting"
+  | "live"
+  | "awaiting"
+  | "stale"
+  | "disconnected"
+  | "paused";
 const NAV = [
   { id: "terminal" as View, label: "Terminal", icon: LayoutDashboard },
   { id: "journal" as View, label: "Journal", icon: ChartNoAxesCombined },
@@ -208,15 +216,11 @@ function EnergyPulse({ snapshot }: { snapshot: Snapshot }) {
       <div className="pulse-status">
         <span className="status-dot" />
         <strong>
-          {snapshot.meta.kind === "fixture"
-            ? "Fixture run complete"
-            : snapshot.meta.kind === "live"
-              ? "Forward paper data"
-              : snapshot.meta.kind === "awaiting"
-                ? "Connecting to live market"
-                : snapshot.meta.kind === "stale"
-                  ? "Live source interrupted"
-                  : "Snapshot loaded"}
+          {snapshot.meta.kind === "live"
+            ? "Verified market observations"
+            : snapshot.meta.kind === "awaiting"
+              ? "Awaiting verified market prices"
+              : "Live source interrupted"}
         </strong>
         <span>Paper mode</span>
       </div>
@@ -262,7 +266,12 @@ function TokenCard({
   snapshotTs: number;
   periods: WatchPeriods;
 }) {
-  const gain = trade?.exitPp ?? token.pnl_pct;
+  const isMarketWatch = trade?.isMarketWatch === true;
+  const gain = isMarketWatch
+    ? token.column === "holding"
+      ? token.pnl
+      : undefined
+    : (trade?.exitPp ?? token.pnl_pct);
   const positive = gain !== undefined && gain >= 0;
   const tag =
     token.column === "checking"
@@ -300,21 +309,29 @@ function TokenCard({
           </strong>
         </span>
         <span>
-          {gain !== undefined
-            ? token.verdict === "SKIP"
-              ? "Historical return"
-              : "Total paper return"
-            : "Bonding curve"}
+          {isMarketWatch
+            ? token.column === "holding"
+              ? "Unrealized paper P&L"
+              : "Paper P&L"
+            : gain !== undefined
+              ? token.verdict === "SKIP"
+                ? "Historical return"
+                : "Total paper return"
+              : "Bonding curve"}
           <strong
             className={
               gain !== undefined ? (positive ? "lime-text" : "red-text") : ""
             }
           >
             {gain !== undefined
-              ? signed(gain, "%")
-              : token.curve_pct != null
-                ? `${token.curve_pct.toFixed(1)}%`
-                : "—"}
+              ? isMarketWatch
+                ? money(gain)
+                : signed(gain, "%")
+              : isMarketWatch
+                ? "Unknown"
+                : token.curve_pct != null
+                  ? `${token.curve_pct.toFixed(1)}%`
+                  : "—"}
           </strong>
         </span>
         {trade && (
@@ -349,7 +366,7 @@ function TokenCard({
         snapshotTs={snapshotTs}
       />
       <p className="token-reason">
-        {token.reason || "Paper engine evaluation recorded."}
+        {token.reason || "Live paper engine evaluation."}
       </p>
       <div className="token-card-foot">
         <span>
@@ -358,7 +375,9 @@ function TokenCard({
           ) : (
             <Clock3 size={11} />
           )}
-          {age === null ? "Recorded decision" : `${age}m since first seen`}
+          {age === null
+            ? "Live timing unavailable"
+            : `${age}m since first seen`}
         </span>
         <span>
           Inspect <ArrowUpRight size={12} />
@@ -393,7 +412,11 @@ function Board({
               .includes(query.toLowerCase()),
           )
           .filter(
-            (t) => lane !== "done" || !closedOnly || t.verdict === "EXIT",
+            (t) =>
+              lane !== "done" ||
+              !closedOnly ||
+              (t.verdict === "EXIT" &&
+                snapshot.trades[t.symbol]?.isMarketWatch !== true),
           );
         const rows =
           lane === "done"
@@ -485,8 +508,8 @@ function Board({
                   <span>Listening for the next signal</span>
                   <small>
                     {snapshot.meta.kind === "live"
-                      ? "Forward paper data · UI monitoring"
-                      : "Snapshot monitoring · no live feed running"}
+                      ? "Verified live feed · UI monitoring"
+                      : "Awaiting a verified live-market frame"}
                   </small>
                 </div>
               )}
@@ -521,7 +544,13 @@ function Detail({
 }) {
   const [copied, setCopied] = useState(false);
   const trade = snapshot.trades[token.symbol];
-  const pnl = trade?.exitPnl ?? token.pnl;
+  const isMarketWatch = trade?.isMarketWatch === true;
+  const pnl = isMarketWatch
+    ? token.column === "holding"
+      ? token.pnl
+      : undefined
+    : (trade?.exitPnl ?? token.pnl);
+  const currentQuote = trade?.series[trade.series.length - 1]?.value;
   async function copyMint() {
     try {
       await navigator.clipboard.writeText(token.mint || token.symbol);
@@ -560,11 +589,27 @@ function Detail({
           <strong>{pct(token.curve_pct)}</strong>
         </div>
         <div>
-          <span>{trade ? "Total trade P&L" : "Board paper P&L"}</span>
+          <span>
+            {isMarketWatch
+              ? token.column === "holding"
+                ? "Unrealized paper P&L"
+                : "Paper P&L"
+              : trade
+                ? "Total trade P&L"
+                : "Board paper P&L"}
+          </span>
           <strong className={pnl != null && pnl < 0 ? "red-text" : "lime-text"}>
-            {pnl == null ? "—" : money(pnl)}
+            {pnl == null && isMarketWatch ? "Unknown" : money(pnl)}
           </strong>
         </div>
+        {isMarketWatch && (
+          <div>
+            <span>Current market quote</span>
+            <strong>
+              {currentQuote == null ? "—" : chartNumber(currentQuote, trade)}
+            </strong>
+          </div>
+        )}
         <div>
           <span>Workflow</span>
           <strong className="capitalize">{token.column}</strong>
@@ -573,7 +618,7 @@ function Detail({
       <div className="detail-watch">
         <div className="section-label">
           THREE-TIER WATCH PERIODS{" "}
-          <span>Recorded checkpoints · not live timers</span>
+          <span>Live observation checkpoints · sampled timing</span>
         </div>
         <TokenWatchPeriods
           token={token}
@@ -584,11 +629,13 @@ function Detail({
       </div>
       <div className="detail-chart">
         <div className="section-label">
-          RECORDED TRADE PATH{" "}
+          {isMarketWatch ? "LIVE MARKET PATH" : "PAPER EXECUTION PATH"}{" "}
           <span>
             {trade
-              ? `${trade.dur} min · ${trade.metric === "unit_price" ? "fixture execution prices" : snapshot.meta.kind === "live" ? "sampled market observations" : "interpolated ledger data"}`
-              : "No completed trade chart"}
+              ? isMarketWatch
+                ? `${trade.dur} min · observed market-cap path · ${token.column === "holding" ? "open paper position" : "market watch"}`
+                : `${trade.dur} min · live database paper execution`
+              : "No sampled market path"}
           </span>
         </div>
         <TradeChart trade={trade} symbol={shortSymbol(token.symbol)} />
@@ -598,7 +645,7 @@ function Detail({
         <div>
           <strong>Latest board decision · {token.verdict || "WATCH"}</strong>
           <p>{token.reason || "No decision reason supplied."}</p>
-          {trade && (
+          {trade && !isMarketWatch && (
             <p className="small-note">
               Total trade P&L includes all ledger exit legs. The board reason
               describes its latest decision, which may be a final leg or a later
@@ -625,8 +672,48 @@ function Detail({
           <p className="small-note">Unknown values are not treated as zero.</p>
         </section>
         <section>
-          <h4>{trade ? "Execution events" : "Signal metadata"}</h4>
-          {trade ? (
+          <h4>
+            {isMarketWatch
+              ? token.column === "holding"
+                ? "Open position watch context"
+                : "Pending entry checkpoints"
+              : trade
+                ? "Execution events"
+                : "Signal metadata"}
+          </h4>
+          {trade && isMarketWatch ? (
+            token.column === "holding" ? (
+              <p className="small-note">
+                Open paper position. This path shows observed quotes; opening
+                gates are not reconstructed as new pending entries.
+              </p>
+            ) : trade.gatesBuy?.length ? (
+              trade.gatesBuy.map((gate) => (
+                <div key={gate.name} className="data-row" title={gate.detail}>
+                  <span>{gate.name}</span>
+                  <b
+                    className={
+                      gate.pass === true
+                        ? "lime-text"
+                        : gate.pass === false
+                          ? "red-text"
+                          : "muted"
+                    }
+                  >
+                    {gate.pass === true
+                      ? "Passed"
+                      : gate.pass === false
+                        ? "Not passed"
+                        : "Checking / unknown"}
+                  </b>
+                </div>
+              ))
+            ) : (
+              <p className="small-note">
+                Risk checkpoints are still checking; no paper entry is implied.
+              </p>
+            )
+          ) : trade ? (
             trade.signals.map((s) => (
               <div className="execution-event" key={s.id}>
                 <span className={`event-dot ${s.kind}`} />
@@ -690,6 +777,7 @@ function Journal({
   const trades = Object.entries(snapshot.trades)
     .filter(
       ([symbol, t]) =>
+        !t.isMarketWatch &&
         symbol.toLowerCase().includes(query.toLowerCase()) &&
         (filter === "all" ||
           (filter === "wins" ? t.exitPnl > 0 : t.exitPnl < 0)),
@@ -799,13 +887,13 @@ function Journal({
         </table>
         {!trades.length && (
           <div className="table-empty">
-            No recorded trades match this filter.
+            No live paper trades match this filter.
           </div>
         )}
       </div>
       <div className="journal-foot">
-        <ShieldCheck size={13} /> Historical paper executions only · recorded
-        market-cap paths or exact fixture execution prices, not full candles.
+        <ShieldCheck size={13} /> Historical paper executions from the live
+        database only · sampled market-cap paths, not full candles.
       </div>
     </section>
   );
@@ -864,7 +952,7 @@ function Strategy({ config }: { config: StrategyConfig }) {
             {config.editable
               ? "Watch durations are editable above. Other risk controls remain read-only."
               : "Default configuration. Connect the paper adapter to save watch durations."}{" "}
-            Fixture simulations use the separate fixture engine configuration.
+            Live-feed availability does not change the configured risk rules.
           </p>
         </div>
         <span className="tiny-tag">PAPER CONFIG</span>
@@ -913,7 +1001,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [simulating, setSimulating] = useState(false);
+  const [connection, setConnection] = useState<FeedConnection>("connecting");
+  const [reconnectNonce, setReconnectNonce] = useState(0);
   const [view, setView] = useState<View>("terminal");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Token | null>(null);
@@ -934,6 +1023,13 @@ export default function App() {
     undefined,
   );
   const queryRef = useRef<HTMLInputElement>(null);
+  const mountedRef = useRef(true);
+  const pausedRef = useRef(paused);
+  const feedGeneration = useRef(0);
+  const streamRevision = useRef(0);
+  const feedAbort = useRef<AbortController | null>(null);
+  const feedQueue = useRef<Promise<void>>(Promise.resolve());
+  pausedRef.current = paused;
   useEffect(() => {
     if (snapshot?.strategyConfig)
       watchSettings.adoptConfig(snapshot.strategyConfig);
@@ -943,65 +1039,177 @@ export default function App() {
     clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(""), 4000);
   }
-  async function refresh(showFeedback = true) {
-    setBusy(true);
+  function applyLiveFrame(next: Snapshot, generation: number) {
+    if (
+      !mountedRef.current ||
+      generation !== feedGeneration.current ||
+      pausedRef.current
+    )
+      return;
+    setSnapshot(next);
     setError("");
-    try {
-      const s = await loadSnapshot();
-      setSnapshot(s);
-      setChartSymbol((current) =>
-        s.trades[current] ? current : Object.keys(s.trades)[0] || "",
-      );
-      if (showFeedback)
-        notify(
-          s.meta.kind === "live"
-            ? "Forward paper market data refreshed."
-            : s.meta.kind === "awaiting"
-              ? "Waiting for verified live-market prices."
-              : s.meta.kind === "stale"
-                ? "Live market data is stale or interrupted."
-                : "Recorded engine snapshot refreshed.",
+    setConnection(next.meta.kind);
+    setChartSymbol((current) =>
+      next.trades[current] ? current : Object.keys(next.trades)[0] || "",
+    );
+  }
+  function markFeedDisconnected(message: string, generation: number) {
+    if (
+      !mountedRef.current ||
+      generation !== feedGeneration.current ||
+      pausedRef.current
+    )
+      return;
+    ++streamRevision.current;
+    feedAbort.current?.abort();
+    setConnection("disconnected");
+    setError(message);
+    setSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            meta: {
+              ...current.meta,
+              kind: "stale",
+              label: "Live feed disconnected",
+            },
+          }
+        : current,
+    );
+  }
+  function queueLiveBootstrap(generation: number, showFeedback = false) {
+    const run = async () => {
+      if (
+        !mountedRef.current ||
+        generation !== feedGeneration.current ||
+        pausedRef.current
+      )
+        return;
+      const controller = new AbortController();
+      feedAbort.current = controller;
+      const revisionAtStart = streamRevision.current;
+      setBusy(true);
+      try {
+        const next = await loadLiveFeed({ signal: controller.signal });
+        if (
+          !mountedRef.current ||
+          generation !== feedGeneration.current ||
+          pausedRef.current ||
+          revisionAtStart !== streamRevision.current ||
+          controller.signal.aborted
+        )
+          return;
+        applyLiveFrame(next, generation);
+        if (showFeedback)
+          notify(
+            next.meta.kind === "live"
+              ? "Verified live market data refreshed."
+              : next.meta.kind === "awaiting"
+                ? "Live feed is awaiting a verified market observation."
+                : "Live feed reports stale market data.",
+          );
+      } catch (e) {
+        if (
+          !mountedRef.current ||
+          generation !== feedGeneration.current ||
+          pausedRef.current ||
+          revisionAtStart !== streamRevision.current ||
+          controller.signal.aborted
+        )
+          return;
+        markFeedDisconnected(
+          e instanceof Error ? e.message : "Live feed disconnected.",
+          generation,
         );
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Unable to load the engine snapshot.",
-      );
-    } finally {
-      setBusy(false);
-    }
+      } finally {
+        if (feedAbort.current === controller) {
+          feedAbort.current = null;
+          if (mountedRef.current) setBusy(false);
+        }
+      }
+    };
+    const task = feedQueue.current.then(run, run);
+    feedQueue.current = task.catch(() => {});
+    return task;
+  }
+  function reconnectLiveFeed() {
+    feedAbort.current?.abort();
+    ++feedGeneration.current;
+    setError("");
+    setConnection("connecting");
+    if (paused) setPaused(false);
+    else setReconnectNonce((n) => n + 1);
+    notify("Reconnecting to the live paper feed.");
   }
   useEffect(() => {
-    void refresh(false);
-    return () => clearTimeout(toastTimer.current);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      ++feedGeneration.current;
+      feedAbort.current?.abort();
+      clearTimeout(toastTimer.current);
+    };
   }, []);
   useEffect(() => {
-    if (paused || snapshot?.meta.kind === "fixture") return;
-    let active = true;
-    let pending = false;
-    const interval = setInterval(() => {
-      if (pending) return;
-      pending = true;
-      loadSnapshot()
-        .then((next) => {
-          if (!active) return;
-          setSnapshot(next);
-          setChartSymbol((current) =>
-            next.trades[current] ? current : Object.keys(next.trades)[0] || "",
-          );
-        })
-        .catch(() => {
-          if (active)
-            setError("Snapshot monitoring interrupted. Refresh to reconnect.");
-        })
-        .finally(() => {
-          pending = false;
+    const generation = ++feedGeneration.current;
+    if (paused) {
+      feedAbort.current?.abort();
+      setConnection("paused");
+      return;
+    }
+    setConnection("connecting");
+    void queueLiveBootstrap(generation);
+    let source: EventSource | undefined;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    if (typeof window.EventSource === "function") {
+      try {
+        source = new window.EventSource("/api/live-feed/events");
+        source.addEventListener("feed", (event) => {
+          try {
+            const frame = validateLiveFeed(
+              JSON.parse((event as MessageEvent<string>).data),
+            );
+            if (
+              !mountedRef.current ||
+              generation !== feedGeneration.current ||
+              pausedRef.current
+            )
+              return;
+            ++streamRevision.current;
+            feedAbort.current?.abort();
+            applyLiveFrame(frame, generation);
+          } catch {
+            source?.close();
+            markFeedDisconnected(
+              "Live feed event was invalid. Reconnect to resume updates.",
+              generation,
+            );
+          }
         });
-    }, 15000);
+        source.onerror = () => {
+          source?.close();
+          markFeedDisconnected(
+            "Live feed disconnected. Reconnect to resume updates.",
+            generation,
+          );
+        };
+      } catch {
+        markFeedDisconnected(
+          "Live event stream could not be opened. Reconnect to try again.",
+          generation,
+        );
+      }
+    } else {
+      poll = setInterval(() => {
+        void queueLiveBootstrap(generation);
+      }, 15_000);
+    }
     return () => {
-      active = false;
-      clearInterval(interval);
+      source?.close();
+      if (poll) clearInterval(poll);
+      if (feedGeneration.current === generation) feedAbort.current?.abort();
     };
-  }, [paused, snapshot?.meta.kind]);
+  }, [paused, reconnectNonce]);
   useEffect(() => {
     try {
       localStorage.setItem("pumpmi-motion", motion ? "on" : "off");
@@ -1019,33 +1227,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-  async function runSimulation() {
-    setSimulating(true);
-    setError("");
-    try {
-      const r = await fetch("/api/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Paper simulation failed.");
-      setSnapshot(data);
-      setChartSymbol(Object.keys(data.trades)[0] || "");
-      setSelected(null);
-      notify(
-        "Fixture simulation complete. Original market snapshot preserved.",
-      );
-    } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Paper simulation unavailable. Check the engine adapter.",
-      );
-    } finally {
-      setSimulating(false);
-    }
-  }
   function inspect(token: Token) {
     setSelected(token);
     setChartSymbol(token.symbol);
@@ -1058,9 +1239,16 @@ export default function App() {
   );
   const stats = board?.stats;
   const returnPct = board ? (board.equity / board.bankroll - 1) * 100 : 0;
+  const closedTrades = snapshot
+    ? Object.entries(snapshot.trades).filter(([, item]) => !item.isMarketWatch)
+    : [];
+  const closedWins = closedTrades.filter(([, item]) => item.exitPnl > 0).length;
+  const closedLosses = closedTrades.filter(
+    ([, item]) => item.exitPnl < 0,
+  ).length;
   const winRate =
-    stats && stats.wins + stats.losses > 0
-      ? (stats.wins / (stats.wins + stats.losses)) * 100
+    closedWins + closedLosses > 0
+      ? (closedWins / (closedWins + closedLosses)) * 100
       : null;
   const viewTitles = {
     terminal: "Command center",
@@ -1180,32 +1368,8 @@ export default function App() {
               </p>
             </div>
             <div className="page-actions">
-              <button
-                className="button secondary"
-                onClick={() => void refresh()}
-                disabled={busy || simulating}
-              >
-                <RefreshCw size={15} className={busy ? "spin" : ""} /> Refresh
-              </button>
-              <button
-                className="button primary"
-                onClick={() => void runSimulation()}
-                disabled={
-                  !snapshot?.meta.simulationAvailable || simulating || busy
-                }
-                title={
-                  !snapshot?.meta.simulationAvailable
-                    ? "Connect the Python paper-engine adapter to enable simulations"
-                    : "Run a finite, offline fixture simulation without changing the recorded dataset"
-                }
-              >
-                <Zap
-                  size={15}
-                  fill="currentColor"
-                  className={simulating ? "spin" : ""}
-                />
-                {simulating ? "Running paper engine…" : "Run paper simulation"}
-                <ArrowUpRight size={14} />
+              <button className="button secondary" onClick={reconnectLiveFeed}>
+                <RefreshCw size={15} className={busy ? "spin" : ""} /> Reconnect
               </button>
             </div>
           </div>
@@ -1213,7 +1377,7 @@ export default function App() {
             <div className="error-banner" role="alert">
               <AlertTriangle size={17} />
               <span>{error}</span>
-              <button onClick={() => void refresh()}>Retry</button>
+              <button onClick={reconnectLiveFeed}>Reconnect</button>
               <button aria-label="Dismiss error" onClick={() => setError("")}>
                 <X size={14} />
               </button>
@@ -1226,13 +1390,13 @@ export default function App() {
               </span>
               <h2>
                 {error
-                  ? "Engine snapshot unavailable"
-                  : "Powering up the terminal"}
+                  ? "Live feed unavailable"
+                  : "Connecting to the live feed"}
               </h2>
               <p>
                 {error
-                  ? "Refresh to reconnect to the paper engine."
-                  : "Reading the board and recorded trade paths…"}
+                  ? "Reconnect to the running paper engine. Historical datasets are not loaded."
+                  : "Reading the current board and sampled market paths…"}
               </p>
             </div>
           ) : (
@@ -1273,7 +1437,7 @@ export default function App() {
                   </div>
                   <div className="metric-caption">
                     <span className="lime-text">{stats?.ticks ?? "—"}</span>{" "}
-                    engine ticks recorded{" "}
+                    engine ticks observed{" "}
                     <Signal size={14} className="metric-corner" />
                   </div>
                 </div>
@@ -1307,78 +1471,66 @@ export default function App() {
                 </div>
                 <div className="metric">
                   <div className="metric-label">
-                    <ChartNoAxesCombined size={14} /> Recorded win rate
+                    <ChartNoAxesCombined size={14} /> Closed-trade win rate
                   </div>
                   <div className="metric-value">
                     {winRate === null ? "—" : `${winRate.toFixed(1)}%`}
                     <span className="metric-unit">closed trades</span>
                   </div>
                   <div className="metric-caption">
-                    <span className="lime-text">{stats?.wins ?? "—"} wins</span>
+                    <span className="lime-text">{closedWins} wins</span>
                     <span className="caption-dot">·</span>
-                    <span>{stats?.losses ?? "—"} losses</span>
+                    <span>{closedLosses} losses</span>
                     <div className="win-meter">
                       <span style={{ width: `${winRate || 0}%` }} />
                     </div>
                   </div>
                 </div>
               </section>
-              <div
-                className={`snapshot-bar ${snapshot.meta.kind === "fixture" ? "fixture-mode" : ""}`}
-              >
+              <div className={`live-feed-bar ${connection}`}>
                 <div>
-                  <span className="snapshot-icon">
-                    {snapshot.meta.kind === "fixture" ? (
-                      <FlaskConical size={14} />
-                    ) : (
-                      <Radio size={14} />
-                    )}
+                  <span className="live-feed-icon">
+                    <Radio size={14} />
                   </span>
                   <strong>
-                    {snapshot.meta.kind === "fixture"
-                      ? "FIXTURE SIMULATION"
-                      : snapshot.meta.kind === "live"
-                        ? "FORWARD PAPER DATA"
-                        : snapshot.meta.kind === "awaiting"
-                          ? "CONNECTING LIVE MARKET"
-                          : snapshot.meta.kind === "stale"
-                            ? "LIVE FEED INTERRUPTED"
-                            : "RECORDED SNAPSHOT"}
+                    {connection === "paused"
+                      ? "LIVE FEED DISPLAY PAUSED"
+                      : connection === "disconnected"
+                        ? "LIVE FEED DISCONNECTED"
+                        : snapshot.meta.kind === "live"
+                          ? "LIVE FEED · VERIFIED"
+                          : snapshot.meta.kind === "awaiting"
+                            ? "LIVE FEED · AWAITING QUOTE"
+                            : "LIVE FEED · STALE"}
                   </strong>
-                  <span className="snapshot-divider" />
+                  <span className="live-feed-divider" />
                   <span>
-                    {snapshot.meta.kind === "fixture"
-                      ? "Offline fixture data · original snapshot preserved"
-                      : board!.ts == null
-                        ? "Waiting for the first verified market observation"
-                        : `Market data captured ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}`}
+                    {connection === "paused"
+                      ? "Display updates paused; the paper worker continues independently"
+                      : connection === "disconnected"
+                        ? "Last live frame retained and marked stale"
+                        : board!.ts == null
+                          ? "Waiting for the first verified market observation"
+                          : `Market data updated ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}`}
                   </span>
                 </div>
                 <button
                   onClick={() => {
-                    if (snapshot.meta.kind === "fixture") {
-                      void refresh();
-                    } else {
-                      setPaused((v) => !v);
-                      notify(
-                        paused
-                          ? "Snapshot monitoring resumed."
-                          : "UI monitoring paused. The paper worker continues independently.",
-                      );
-                    }
+                    setPaused((value) => !value);
+                    notify(
+                      paused
+                        ? "Live feed display resumed."
+                        : "Live feed display paused. The paper worker continues independently.",
+                    );
                   }}
                 >
-                  {snapshot.meta.kind === "fixture" ? (
+                  {paused ? (
                     <>
-                      <RefreshCw size={12} /> Return to snapshot
-                    </>
-                  ) : paused ? (
-                    <>
-                      <Play size={12} /> Resume monitoring
+                      <Play size={12} /> Resume live feed
                     </>
                   ) : (
                     <>
-                      <Pause size={12} /> Pause monitoring
+                      <Pause size={12} /> Pause display updates
                     </>
                   )}
                 </button>
@@ -1398,9 +1550,9 @@ export default function App() {
                           <ChartNoAxesCombined size={16} /> Trade spotlight{" "}
                           <span className="dim-label">
                             /{" "}
-                            {snapshot.meta.kind === "live"
-                              ? "SAMPLED MARKET PATH"
-                              : "RECORDED EXECUTION"}
+                            {trade?.isMarketWatch
+                              ? "LIVE MARKET PATH"
+                              : "PAPER EXECUTION PATH"}
                           </span>
                         </span>
                         <button
@@ -1428,7 +1580,7 @@ export default function App() {
                               className="sr-only"
                               htmlFor="spotlight-asset"
                             >
-                              Choose recorded trade
+                              Choose live market path or paper execution
                             </label>
                             <div className="asset-select">
                               <select
@@ -1451,7 +1603,7 @@ export default function App() {
                               <ChevronDown size={14} />
                             </div>
                             <span>
-                              {chartToken?.name || "Recorded paper trade"}{" "}
+                              {chartToken?.name || "Live paper path"}{" "}
                               <span className="spotlight-id">
                                 {identifier(chartSymbol)}
                               </span>
@@ -1470,14 +1622,18 @@ export default function App() {
                           </strong>
                           <span
                             className={
-                              trade && trade.exitPp < 0
+                              trade && !trade.isMarketWatch && trade.exitPp < 0
                                 ? "red-text"
                                 : "lime-text"
                             }
                           >
                             {trade
-                              ? `${signed(trade.exitPp, "%")} return`
-                              : "Awaiting trade data"}
+                              ? trade.isMarketWatch
+                                ? chartToken?.column === "holding"
+                                  ? "Current market quote · open paper position"
+                                  : "Current market quote · market watch"
+                                : `${signed(trade.exitPp, "%")} return`
+                              : "Awaiting sampled market path"}
                           </span>
                         </div>
                       </div>
@@ -1489,7 +1645,8 @@ export default function App() {
                           </span>
                         </div>
                         <span className="chart-period">
-                          FULL TRADE <span className="status-dot" />
+                          {trade?.isMarketWatch ? "LIVE PATH" : "FULL TRADE"}{" "}
+                          <span className="status-dot" />
                         </span>
                       </div>
                       <TradeChart
@@ -1499,14 +1656,21 @@ export default function App() {
                       />
                       <div className="chart-bottom">
                         <div>
-                          <span className="legend-line" /> Recorded path{" "}
-                          <span className="legend-entry" /> Entry level{" "}
+                          <span className="legend-line" />{" "}
+                          {trade?.isMarketWatch
+                            ? "Live market path"
+                            : "Paper execution path"}{" "}
+                          {!trade?.isMarketWatch && (
+                            <>
+                              <span className="legend-entry" /> Entry level{" "}
+                            </>
+                          )}
                           <span className="chart-data-note">
-                            {trade?.metric === "unit_price"
-                              ? "Fixture executions"
-                              : snapshot.meta.kind === "live"
-                                ? "Sampled market observations"
-                                : "Ledger interpolation"}
+                            {trade?.isMarketWatch
+                              ? chartToken?.column === "holding"
+                                ? "Observed quotes · open paper position"
+                                : "Observed current-market quotes · no plotted paper execution"
+                              : "Historical paper execution from the live database"}
                           </span>
                         </div>
                         <button
@@ -1567,7 +1731,7 @@ export default function App() {
                       <span>
                         <Terminal size={15} /> Engine activity{" "}
                         <span className="dim-label">
-                          / LATEST RECORDED EVENTS
+                          / LATEST LIVE ENGINE EVENTS
                         </span>
                       </span>
                       <span className="activity-count">
@@ -1604,7 +1768,7 @@ export default function App() {
                         })
                       ) : (
                         <div className="table-empty">
-                          No activity log supplied by this engine snapshot.
+                          No activity log supplied by the live engine.
                         </div>
                       )}
                     </div>
@@ -1624,15 +1788,14 @@ export default function App() {
                       <Search size={15} />
                       <input
                         ref={queryRef}
-                        placeholder="Search recorded trades…"
+                        placeholder="Search live paper trades…"
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        aria-label="Search recorded trades"
+                        aria-label="Search live paper trades"
                       />
                     </label>
                     <span>
-                      {Object.keys(snapshot.trades).length} recorded trade
-                      charts
+                      {closedTrades.length} live database paper-trade charts
                     </span>
                   </div>
                   <Journal
@@ -1719,17 +1882,17 @@ export default function App() {
           </div>
           <div className="preference">
             <div>
-              <strong>Snapshot monitoring</strong>
+              <strong>Live feed display</strong>
               <p>
-                Re-read engine output every 15 seconds. Does not start a live
-                feed.
+                Pause or resume browser updates. The paper worker continues
+                independently; reconnect requests a fresh live frame.
               </p>
             </div>
             <button
               className={`toggle ${!paused ? "on" : ""}`}
               role="switch"
               aria-checked={!paused}
-              aria-label="Snapshot monitoring"
+              aria-label="Live feed display"
               onClick={() => setPaused((v) => !v)}
             >
               <span />
@@ -1751,44 +1914,45 @@ export default function App() {
                 <p>
                   The board mirrors existing engine decisions. Checking signals
                   are under review, holding contains active paper positions, and
-                  done includes exits and skips. Inspect a card to see its
-                  recorded reason.
+                  done includes closed paper executions and skips. Inspect a
+                  card to see the latest live-engine reason.
                 </p>
               </section>
             </div>
             <div>
               <span className="guide-number">02</span>
               <section>
-                <h3>Snapshot, not a running live feed</h3>
+                <h3>Running live feed, verified frames</h3>
                 <p>
-                  The terminal reads the repository’s recorded market data.
-                  Refresh and monitoring re-read those files; they do not fetch
-                  new markets or place orders. Start the existing paper feed
-                  separately if you want to update its output.
+                  The terminal bootstraps from the running paper engine and
+                  listens for live-feed events. A stream connection alone does
+                  not make a quote live: the board labels a frame live only
+                  after it receives a verified live-market payload.
                 </p>
               </section>
             </div>
             <div>
               <span className="guide-number">03</span>
               <section>
-                <h3>Run a safe fixture simulation</h3>
+                <h3>Pause display or reconnect</h3>
                 <p>
-                  Run paper simulation executes the original fixture engine once
-                  using offline data in isolated storage. Your recorded dataset
-                  is preserved. Return to snapshot restores the original view.
+                  Pausing stops browser display updates only. Reconnect requests
+                  a fresh JSON live frame and reopens the event stream. If the
+                  worker or network is unavailable, the terminal keeps the last
+                  live frame marked stale rather than loading historical data.
                 </p>
               </section>
             </div>
             <div>
               <span className="guide-number">04</span>
               <section>
-                <h3>Charts explain executions</h3>
+                <h3>Market paths and paper executions</h3>
                 <p>
-                  Recorded market-cap paths interpolate the existing ledger’s
-                  key points. Fixture charts show exact unit-price executions.
-                  Neither represents full market candle histories. Equity and
-                  aggregate wins/losses come from board statistics; journal
-                  charts may cover only a subset.
+                  Live market paths are observed market-cap samples with entry
+                  risk checkpoints still pending; they do not imply a BUY, SELL,
+                  profit, or flat outcome. The journal includes only closed
+                  paper executions stored by the live database. Neither path is
+                  a full candle history.
                 </p>
               </section>
             </div>

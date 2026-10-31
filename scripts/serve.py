@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Pumpmi's deliberately small HTTP adapter.
 
-The adapter exposes recorded board data and a bounded, offline fixture simulation.
+The normal dashboard consumes a running live-market paper feed. Offline fixture
+simulation remains an isolated test utility, never a live-feed fallback.
 It does not expose wallets, keys, live orders, or arbitrary engine configuration.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import csv
 import json
 import mimetypes
@@ -36,6 +38,9 @@ SIMULATION_LOCK = threading.Lock()
 OPTIMIZER_LOCK = threading.Lock()
 OPTIMIZER_RUNTIME: Any | None = None
 OPTIMIZER_RUNTIME_ERROR: str | None = None
+LIVE_FEED_LOCK = threading.RLock()
+LIVE_FEED_CACHE: tuple[float, dict[str, Any]] | None = None
+LIVE_STREAM_SLOTS = threading.BoundedSemaphore(8)
 
 
 def _durable_optimizer_requested(strategy_config_path: Path | None = None) -> bool:
@@ -112,27 +117,34 @@ def _read_json(path: Path) -> Any:
         return json.load(fh)
 
 
-def snapshot_payload(*, simulation_available: bool = True, strategy_config_path: Path | None = None) -> dict[str, Any]:
-    """Return the raw recorded datasets with the UI envelope required by the API."""
+def live_feed_payload(*, strategy_config_path: Path | None = None) -> dict[str, Any]:
+    """Only current live-engine data; a missing worker never exposes saved snapshots."""
+    global LIVE_FEED_CACHE
     runtime = _runtime_for_payload(strategy_config_path)
-    if runtime is not None:
-        payload = runtime.snapshot_payload()
-        payload["strategyConfig"] = strategy_payload(strategy_config_path)
-        return payload
-    board = _read_json(BOARD_PATH)
-    trades = _read_json(TRADES_PATH)
-    return {
-        "board": board,
-        "trades": trades,
-        "meta": {
-            "kind": "snapshot",
-            "label": "Recorded market snapshot · paper trades",
-            "updated": board.get("updated"),
-            "simulationAvailable": simulation_available,
-        },
-        # This is adapter metadata only; the captured board and trades above stay raw.
-        "strategyConfig": strategy_payload(strategy_config_path),
-    }
+    if runtime is None or not runtime.enabled:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Live market feed unavailable: enable the paper worker and its durable database. No historical fallback is served.")
+    with LIVE_FEED_LOCK:
+        if strategy_config_path is None and LIVE_FEED_CACHE is not None and time.monotonic() - LIVE_FEED_CACHE[0] < 5:
+            return deepcopy(LIVE_FEED_CACHE[1])
+        try:
+            payload = runtime.snapshot_payload()
+            if payload.get("meta", {}).get("kind") not in {"live", "awaiting", "stale"}:
+                raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Live feed returned an invalid source state.")
+            payload["strategyConfig"] = strategy_payload(strategy_config_path)
+            payload["meta"]["simulationAvailable"] = False
+            payload["meta"]["transport"] = "server-sent-events"
+            if strategy_config_path is None:
+                LIVE_FEED_CACHE = (time.monotonic(), deepcopy(payload))
+            return payload
+        except ApiError:
+            raise
+        except Exception as exc:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Live market feed is temporarily disconnected; no saved data fallback is served.") from exc
+
+
+def snapshot_payload(*, simulation_available: bool = False, strategy_config_path: Path | None = None) -> dict[str, Any]:
+    """Legacy compatibility alias for live-only data, never archived board files."""
+    return live_feed_payload(strategy_config_path=strategy_config_path)
 
 
 def strategy_payload(strategy_config_path: Path | None = None) -> dict[str, Any]:
@@ -146,9 +158,18 @@ def strategy_payload(strategy_config_path: Path | None = None) -> dict[str, Any]
     runtime = _runtime_for_payload(strategy_config_path)
     if runtime is not None:
         document = runtime.config()
-        strategy = dict(STRAT)
+        from src.optimizer.policy import RISK_LIMITS, EXIT_RULES, MAX_OPEN  # type: ignore
+        strategy = {
+            "min_curve_pct": RISK_LIMITS["min_curve_pct"], "max_curve_pct": RISK_LIMITS["max_curve_pct"],
+            "max_mcap_usd": RISK_LIMITS["max_mcap_usd"], "p0_top10_max": RISK_LIMITS["top10_max"],
+            "p0_dev_max": RISK_LIMITS["dev_max"], "p0_bundle_max": RISK_LIMITS["bundle_max"],
+            "size_pct_equity": 1.5, "size_min": 130, "size_max": 160, "loss_streak_halve": 3,
+            "stop_loss_pct": EXIT_RULES["stop_loss_pct"], "scale_out_pct": EXIT_RULES["scale_out_pct"],
+            "trail_giveback_pct": EXIT_RULES["trail_giveback_pct"],
+            "flat_exit_s": EXIT_RULES["soft_exit_seconds"], "hard_exit_s": EXIT_RULES["hard_exit_seconds"],
+        }
         strategy.update(
-            max_open=document["max_open"],
+            max_open=MAX_OPEN,
             watch_short_s=document["watchPeriods"]["short"],
             watch_medium_s=document["watchPeriods"]["medium"],
             watch_long_s=document["watchPeriods"]["long"],
@@ -469,8 +490,8 @@ def dispatch(
     if parsed.query:
         raise ApiError(HTTPStatus.BAD_REQUEST, "query parameters are not supported")
     path = parsed.path
-    if method == "GET" and path == "/api/snapshot":
-        return HTTPStatus.OK, snapshot_payload(strategy_config_path=strategy_config_path)
+    if method == "GET" and path in {"/api/live-feed", "/api/snapshot"}:
+        return HTTPStatus.OK, live_feed_payload(strategy_config_path=strategy_config_path)
     if method == "GET" and path == "/api/optimizer":
         return HTTPStatus.OK, optimizer_status_payload(strategy_config_path)
     if method == "GET" and path == "/api/strategy":
@@ -535,6 +556,44 @@ class PumpmiHandler(BaseHTTPRequestHandler):
             self.log_error("unhandled adapter error")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal server error"}, head_only=head_only)
 
+    def _send_live_stream(self) -> None:
+        if not LIVE_STREAM_SLOTS.acquire(blocking=False):
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Live stream capacity reached. Reconnect shortly."})
+            return
+        try:
+            runtime = _runtime_for_payload()
+            if runtime is None or not runtime.enabled:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Live market worker is unavailable; no snapshot fallback."})
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.wfile.write(b"retry: 3000\n: live feed connected; awaiting verified price frame\n\n")
+            self.wfile.flush()
+            previous = None
+            while True:
+                try:
+                    frame = live_feed_payload()
+                    encoded = json.dumps(frame, ensure_ascii=False, separators=(",", ":"))
+                    if encoded != previous:
+                        self.wfile.write(f"event: feed\ndata: {encoded}\n\n".encode("utf-8"))
+                        previous = encoded
+                    else:
+                        self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                except ApiError:
+                    self.wfile.write(b'event: feed-error\ndata: {"error":"Live feed disconnected; reconnecting without historical data."}\n\n')
+                    self.wfile.flush()
+                    return
+                time.sleep(5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            LIVE_STREAM_SLOTS.release()
+
     def _read_request_body(self) -> bytes:
         if self.headers.get("Transfer-Encoding"):
             raise ApiError(HTTPStatus.BAD_REQUEST, "chunked request bodies are not supported")
@@ -576,7 +635,9 @@ class PumpmiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
-        if path.startswith("/api/") or path == "/health":
+        if path == "/api/live-feed/events":
+            self._send_live_stream()
+        elif path.startswith("/api/") or path == "/health":
             self._send_api()
         else:
             self._send_static()

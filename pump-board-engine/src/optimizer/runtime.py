@@ -588,6 +588,37 @@ class OptimizerRuntime:
                 "exitPp": round(100.0 * float(trade["net"]) / entry_notional, 2),
                 "dur": round((float(trade["exit_at"]) - float(trade["entry_at"])) / 60.0, 2), "_exitTs": float(trade["exit_at"]),
             }
+        # Active watched/held tokens have live price paths even before a closed
+        # paper execution exists. They are not journal trades or realized returns.
+        for track in tracked.values():
+            mint = str(track["mint"])
+            key = _display_symbol(track["symbol"], mint)
+            if key in charts:
+                continue
+            started = _number(track.get("watch_started_ts", track.get("started_at")))
+            if started is None:
+                continue
+            points = [point for point in by_mint.get(mint, []) if float(point["observed_at"]) >= started]
+            if not points:
+                continue
+            checkpoints = watch_checkpoint_state(track, as_of=as_of)
+            risk = track.get("risk") or {}
+            risk_known = risk.get("status") == "known"
+            limits = (("top10_pct", 30), ("dev_pct", 5), ("bundle_pct", 25))
+            risk_safe = risk_known and all(_number(risk.get(name)) is not None and float(risk[name]) <= cap for name, cap in limits)
+            observed_windows = sum(1 for item in checkpoints.values() if item["status"] == "observed")
+            charts[key] = {
+                "isMarketWatch": True, "metric": "market_cap",
+                "series": [{"label": _now_iso(float(point["observed_at"])), "value": float(point["market_cap"])} for point in points],
+                "signals": [], "entry": 0, "exitPnl": 0, "exitPp": 0,
+                "dur": round((float(points[-1]["observed_at"]) - started) / 60, 2),
+                "gatesBuy": [
+                    {"name": "Holder risk", "detail": "Validated concentrations within risk caps" if risk_safe else str(risk.get("reason") or "Holder risk unavailable or outside limits; entry blocked"), "pass": bool(risk_safe)},
+                    {"name": "Watch checkpoints", "detail": f"{observed_windows}/3 actual observations; pending entry gates", "pass": observed_windows == 3},
+                    {"name": "Paper execution", "detail": "Live market watch path, not a completed paper execution", "pass": False},
+                ],
+                "gatesSell": [],
+            }
         observed = _number(source.get("lastObservation"))
         verified = observed is not None and not source.get("error") and 0 <= now - observed <= 180
         kind = "live" if verified else "awaiting" if observed is None else "stale"
