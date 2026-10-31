@@ -2,11 +2,15 @@
 """Stdlib tests for the adapter's endpoint dispatcher and fixture isolation."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, Mock
@@ -197,6 +201,277 @@ class ApiContractTests(unittest.TestCase):
         with self.assertRaises(serve.ApiError) as caught:
             self.dispatch("POST", "/api/simulate?anything=1", b"{}")
         self.assertEqual(int(caught.exception.status), 400)
+
+
+ENGINE = ROOT / "pump-board-engine"
+if str(ENGINE) not in sys.path:
+    sys.path.insert(0, str(ENGINE))
+
+from src.file_feed import (  # noqa: E402
+    command_is_live_feed,
+    process_is_live_feed,
+    publish_pid,
+    read_pid,
+    release_pid,
+)
+
+
+def write_board(out: Path, *, now: float, ts, equity: float = 1108.36, source: str = "LIVE MARKET DATA · PAPER TRADES", mode: str = "paper") -> None:
+    board = {
+        "ts": ts,
+        "mode": mode,
+        "bankroll": 1500,
+        "equity": equity,
+        "multiple": round(equity / 1500, 3) if equity else 0,
+        "columns": {
+            "checking": [{"symbol": "PAPER", "mint": "MintPaper111", "column": "checking", "mcap": 12000}],
+            "holding": [{"symbol": "HELD", "mint": "MintHeld222", "column": "holding", "mcap": 18000}],
+            "done": [],
+        },
+        "source": source,
+        "updated": "2026-10-31 14:14:00 UTC",
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "board.json"
+    path.write_text(json.dumps(board), encoding="utf-8")
+    os.utime(path, (now, now))
+
+
+@contextlib.contextmanager
+def running_file_worker(out: Path):
+    """A sleep process whose command line is src/live_feed.py, named by the pid file."""
+    stub_root = Path(tempfile.mkdtemp(prefix="pumpmi-feed-stub-"))
+    script_dir = stub_root / "src"
+    script_dir.mkdir()
+    script = script_dir / "live_feed.py"
+    script.write_text("import time\ntime.sleep(120)\n", encoding="utf-8")
+    proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "live_feed.pid").write_text(f"{proc.pid}\n", encoding="utf-8")
+        deadline = time.time() + 3
+        while time.time() < deadline and not process_is_live_feed(proc.pid):
+            time.sleep(0.02)
+        if not process_is_live_feed(proc.pid):
+            raise RuntimeError("stub live_feed process was not visible")
+        yield proc
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=2)
+        shutil.rmtree(stub_root, ignore_errors=True)
+
+
+class FileBackedLiveFeedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory(prefix="pumpmi-api-strategy-")
+        self.strategy_path = Path(self.temporary_directory.name) / "strategy.json"
+        self.strategy_path.write_bytes((ENGINE / "strategy.json").read_bytes())
+        self.out = Path(self.temporary_directory.name) / "out"
+        self.out.mkdir()
+        self.now = time.time()
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def dispatch(self, method: str, target: str, body: bytes = b""):
+        return serve.dispatch(method, target, body, strategy_config_path=self.strategy_path)
+
+    def test_command_line_matches_only_the_file_worker(self) -> None:
+        self.assertTrue(command_is_live_feed("python3 -m src.live_feed"))
+        self.assertTrue(command_is_live_feed("/usr/bin/python3 /tmp/src/live_feed.py"))
+        self.assertFalse(command_is_live_feed("python3 scripts/serve.py"))
+        self.assertFalse(command_is_live_feed("python3 scripts/test_live_feed.py"))
+        self.assertFalse(process_is_live_feed(os.getpid()))
+
+    def test_fresh_worker_serves_board_equity_and_lanes(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now, equity=1108.36)
+        (self.out / "trade_charts.json").write_text(
+            json.dumps({"PAPER": {"entry": 30199, "exitPnl": -24.25, "series": [{"label": "t", "value": 30199}]}}),
+            encoding="utf-8",
+        )
+        with running_file_worker(self.out), patch.dict(os.environ, {"DATABASE_URL": ""}), patch.object(serve, "OUT_DIR", self.out), patch.object(
+            serve, "simulate_payload", side_effect=AssertionError("simulate used as live feed")
+        ), patch.object(serve, "_read_json", side_effect=AssertionError("archived snapshot loader used")):
+            for route in ("/api/live-feed", "/api/snapshot"):
+                status, payload = self.dispatch("GET", route)
+                self.assertEqual(int(status), 200, route)
+                self.assertEqual(payload["meta"]["kind"], "live")
+                self.assertEqual(payload["meta"]["label"], "Verified live-market paper board")
+                self.assertFalse(payload["meta"]["simulationAvailable"])
+                self.assertEqual(payload["meta"]["transport"], "server-sent-events")
+                self.assertEqual(payload["board"]["equity"], 1108.36)
+                self.assertEqual(payload["board"]["bankroll"], 1500)
+                self.assertEqual(payload["board"]["mode"], "paper")
+                self.assertEqual(payload["board"]["columns"]["checking"][0]["mint"], "MintPaper111")
+                self.assertEqual(payload["board"]["columns"]["holding"][0]["symbol"], "HELD")
+                self.assertEqual(payload["trades"]["PAPER"]["exitPnl"], -24.25)
+                self.assertTrue(payload["strategyConfig"]["paperOnly"])
+            self.assertIsNone(serve.live_stream_block_reason())
+
+    def test_missing_timestamp_is_awaiting_and_future_timestamp_is_stale(self) -> None:
+        with running_file_worker(self.out), patch.object(serve, "OUT_DIR", self.out):
+            write_board(self.out, now=self.now, ts=None)
+            _, awaiting = self.dispatch("GET", "/api/live-feed")
+            self.assertEqual(awaiting["meta"]["kind"], "awaiting")
+            self.assertFalse(awaiting["meta"]["simulationAvailable"])
+            self.assertEqual(awaiting["board"]["equity"], 1108.36)
+            write_board(self.out, now=self.now, ts=self.now + 30)
+            _, stale = self.dispatch("GET", "/api/live-feed")
+            self.assertEqual(stale["meta"]["kind"], "stale")
+            self.assertFalse(stale["meta"]["simulationAvailable"])
+            self.assertEqual(stale["board"]["columns"]["checking"][0]["mint"], "MintPaper111")
+
+    def test_stopped_worker_and_stale_board_stay_503(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now, equity=424242.42)
+        (self.out / "live_feed.pid").write_text("999999\n", encoding="utf-8")
+        tempting = {"board": {"equity": 1, "ts": self.now, "bankroll": 1, "columns": {"checking": [], "holding": [], "done": []}}, "trades": {}, "meta": {"kind": "live", "label": "archived"}}
+        with patch.dict(os.environ, {"DATABASE_URL": ""}), patch.object(serve, "OUT_DIR", self.out), patch.object(serve, "_read_json", return_value=tempting):
+            with self.assertRaises(serve.ApiError) as stopped:
+                self.dispatch("GET", "/api/live-feed")
+            self.assertEqual(int(stopped.exception.status), 503)
+            self.assertIn("not running", stopped.exception.message)
+            self.assertIn("No historical fallback", stopped.exception.message)
+            self.assertNotIn("424242.42", stopped.exception.message)
+            self.assertIsNotNone(serve.live_stream_block_reason())
+            self.assertIn("not running", serve.live_stream_block_reason() or "")
+
+            with running_file_worker(self.out):
+                os.utime(self.out / "board.json", (self.now - 181, self.now - 181))
+                with self.assertRaises(serve.ApiError) as old_file:
+                    self.dispatch("GET", "/api/live-feed")
+                self.assertIn("missing or stale", old_file.exception.message)
+                self.assertNotIn("424242.42", old_file.exception.message)
+
+                write_board(self.out, now=self.now, ts=self.now - 181, equity=424242.42)
+                with self.assertRaises(serve.ApiError) as old_ts:
+                    self.dispatch("GET", "/api/live-feed")
+                self.assertIn("stale", old_ts.exception.message)
+                self.assertNotIn("424242.42", old_ts.exception.message)
+
+    def test_unrelated_live_process_is_not_the_worker(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now, equity=424242.42)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            (self.out / "live_feed.pid").write_text(f"{proc.pid}\n", encoding="utf-8")
+            with patch.object(serve, "OUT_DIR", self.out):
+                with self.assertRaises(serve.ApiError) as caught:
+                    self.dispatch("GET", "/api/live-feed")
+            self.assertIn("not running", caught.exception.message)
+        finally:
+            proc.kill()
+            proc.wait(timeout=2)
+
+    def test_fixtures_and_non_paper_boards_are_not_a_live_feed(self) -> None:
+        with running_file_worker(self.out), patch.object(serve, "OUT_DIR", self.out):
+            write_board(self.out, now=self.now, ts=self.now, source="OFFLINE FIXTURES · PAPER TRADES")
+            with self.assertRaises(serve.ApiError) as fixture:
+                self.dispatch("GET", "/api/live-feed")
+            self.assertIn("Fixture", fixture.exception.message)
+            write_board(self.out, now=self.now, ts=self.now, mode="live")
+            with self.assertRaises(serve.ApiError) as trading:
+                self.dispatch("GET", "/api/live-feed")
+            self.assertIn("non-paper", trading.exception.message)
+
+    def test_stale_or_fixture_trade_charts_are_omitted(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now)
+        charts = self.out / "trade_charts.json"
+        charts.write_text(json.dumps({"OLD": {"entry": 1}}), encoding="utf-8")
+        os.utime(charts, (self.now - 181, self.now - 181))
+        with running_file_worker(self.out), patch.object(serve, "OUT_DIR", self.out):
+            _, payload = self.dispatch("GET", "/api/live-feed")
+            self.assertEqual(payload["trades"], {})
+            charts.write_text(json.dumps({"ZEPH": {"metric": "unit_price", "entry": 1}}), encoding="utf-8")
+            _, fixture_charts = self.dispatch("GET", "/api/live-feed")
+            self.assertEqual(fixture_charts["trades"], {})
+            self.assertEqual(fixture_charts["meta"]["kind"], "live")
+
+    def test_enabled_optimizer_is_preferred_over_a_fresh_file_worker(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now, equity=424242.42)
+        runtime = Mock(enabled=True)
+        runtime.snapshot_payload.return_value = {
+            "board": {"ts": 1, "bankroll": 1500, "equity": 1500, "columns": {"checking": [], "holding": [], "done": []}},
+            "trades": {},
+            "meta": {"kind": "awaiting", "label": "Awaiting live prices", "simulationAvailable": True},
+        }
+        with running_file_worker(self.out), patch.object(serve, "OUT_DIR", self.out), patch.object(
+            serve, "_runtime_for_payload", return_value=runtime
+        ), patch.object(serve, "strategy_payload", return_value={"revision": 7}), patch.object(
+            serve, "_file_backed_live_payload", side_effect=AssertionError("file worker used while optimizer is enabled")
+        ):
+            status, frame = self.dispatch("GET", "/api/live-feed")
+        self.assertEqual(int(status), 200)
+        self.assertEqual(frame["meta"]["kind"], "awaiting")
+        self.assertEqual(frame["board"]["equity"], 1500)
+        self.assertFalse(frame["meta"]["simulationAvailable"])
+
+    def test_configured_database_does_not_fall_back_to_files(self) -> None:
+        write_board(self.out, now=self.now, ts=self.now, equity=424242.42)
+        with running_file_worker(self.out), patch.object(serve, "OUT_DIR", self.out), patch.object(
+            serve, "_runtime_for_payload", return_value=None
+        ), patch.object(serve, "_durable_optimizer_requested", return_value=True):
+            with self.assertRaises(serve.ApiError) as caught:
+                self.dispatch("GET", "/api/live-feed")
+            self.assertIn("durable database", caught.exception.message)
+            self.assertEqual(serve.live_stream_block_reason(), "Live market worker is unavailable; no snapshot fallback.")
+
+    def test_checked_in_board_is_not_served_without_a_worker(self) -> None:
+        archived = json.loads((ENGINE / "out" / "board.json").read_text(encoding="utf-8"))
+        pid = read_pid(serve.OUT_DIR / "live_feed.pid")
+        if pid and process_is_live_feed(pid):
+            self.skipTest("a file-backed worker is already running")
+        previous = os.environ.get("DATABASE_URL")
+        os.environ.pop("DATABASE_URL", None)
+        try:
+            with patch.object(serve, "_read_json", side_effect=AssertionError("archived snapshot loader used")):
+                with self.assertRaises(serve.ApiError) as caught:
+                    serve.live_feed_payload()
+            self.assertEqual(int(caught.exception.status), 503)
+            self.assertNotIn(str(archived["equity"]), caught.exception.message)
+        finally:
+            if previous is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = previous
+
+    def test_worker_write_publishes_board_charts_and_pid(self) -> None:
+        import src.live_feed as live_feed
+        from src.live_feed import Feed
+
+        work = Path(self.temporary_directory.name) / "worker"
+        work.mkdir()
+        strategy = work / "strategy.json"
+        strategy.write_bytes((ENGINE / "strategy.json").read_bytes())
+        previous = os.getcwd()
+        with patch.object(live_feed, "Ledger"), patch.object(live_feed, "LunarCrushClient") as lunar, patch.object(Feed, "restore", lambda self: None):
+            lunar.return_value.mode = "off"
+            os.chdir(work)
+            try:
+                feed = Feed({"mode": "paper", "bankroll_usd": 1500}, strategy_config_path=strategy)
+                feed.write()
+            finally:
+                os.chdir(previous)
+        board = json.loads((work / "out" / "board.json").read_text(encoding="utf-8"))
+        charts = json.loads((work / "out" / "trade_charts.json").read_text(encoding="utf-8"))
+        self.assertEqual(board["mode"], "paper")
+        self.assertEqual(board["source"], "LIVE MARKET DATA · PAPER TRADES")
+        self.assertEqual(board["bankroll"], 1500)
+        self.assertIsInstance(board["equity"], (int, float))
+        self.assertIsInstance(board["ts"], float)
+        self.assertEqual(set(board["columns"]), {"checking", "holding", "done"})
+        self.assertIsInstance(charts, dict)
+        self.assertEqual(read_pid(work / "out" / "live_feed.pid"), os.getpid())
+
+    def test_publish_pid_refuses_to_replace_a_live_worker(self) -> None:
+        with running_file_worker(self.out):
+            owner = read_pid(self.out / "live_feed.pid")
+            with self.assertRaises(RuntimeError):
+                publish_pid(self.out, pid=os.getpid())
+            self.assertEqual(read_pid(self.out / "live_feed.pid"), owner)
+            release_pid(self.out, pid=os.getpid())
+            self.assertEqual(read_pid(self.out / "live_feed.pid"), owner)
+            release_pid(self.out, pid=owner)
+            self.assertIsNone(read_pid(self.out / "live_feed.pid"))
 
 
 if __name__ == "__main__":

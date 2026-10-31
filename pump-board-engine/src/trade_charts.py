@@ -66,7 +66,8 @@ def label_of(kind, r):
     return f"Sell {pct}"
 
 def build():
-    rows = list(csv.DictReader(open(FILLS)))
+    with open(FILLS, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
     by = {}
     for r in rows: by.setdefault(r["symbol"], []).append(r)
     trades = {}

@@ -117,12 +117,43 @@ def _read_json(path: Path) -> Any:
         return json.load(fh)
 
 
+def _file_backed_live_payload(strategy_config_path: Path | None = None) -> dict[str, Any]:
+    """Serve the running file worker. A stopped or stale publisher stays a 503."""
+    _add_engine_to_path()
+    from src.file_feed import FileFeedUnavailable, load_live_payload  # type: ignore
+
+    try:
+        payload = load_live_payload(OUT_DIR)
+    except FileFeedUnavailable as exc:
+        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, exc.message) from exc
+    payload["strategyConfig"] = strategy_payload(strategy_config_path)
+    payload["meta"]["simulationAvailable"] = False
+    payload["meta"]["transport"] = "server-sent-events"
+    return payload
+
+
+def live_stream_block_reason() -> str | None:
+    """None when the SSE stream may open. The reason matches the bootstrap 503."""
+    runtime = _runtime_for_payload()
+    if runtime is not None and getattr(runtime, "enabled", False):
+        return None
+    if _durable_optimizer_requested() or runtime is not None:
+        return "Live market worker is unavailable; no snapshot fallback."
+    try:
+        _file_backed_live_payload()
+    except ApiError as exc:
+        return exc.message
+    return None
+
+
 def live_feed_payload(*, strategy_config_path: Path | None = None) -> dict[str, Any]:
     """Only current live-engine data; a missing worker never exposes saved snapshots."""
     global LIVE_FEED_CACHE
     runtime = _runtime_for_payload(strategy_config_path)
-    if runtime is None or not runtime.enabled:
-        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Live market feed unavailable: enable the paper worker and its durable database. No historical fallback is served.")
+    if runtime is None or not getattr(runtime, "enabled", False):
+        if _durable_optimizer_requested(strategy_config_path) or runtime is not None:
+            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "Live market feed unavailable: enable the paper worker and its durable database. No historical fallback is served.")
+        return _file_backed_live_payload(strategy_config_path)
     with LIVE_FEED_LOCK:
         if strategy_config_path is None and LIVE_FEED_CACHE is not None and time.monotonic() - LIVE_FEED_CACHE[0] < 5:
             return deepcopy(LIVE_FEED_CACHE[1])
@@ -561,9 +592,9 @@ class PumpmiHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Live stream capacity reached. Reconnect shortly."})
             return
         try:
-            runtime = _runtime_for_payload()
-            if runtime is None or not runtime.enabled:
-                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Live market worker is unavailable; no snapshot fallback."})
+            reason = live_stream_block_reason()
+            if reason is not None:
+                self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": reason})
                 return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
