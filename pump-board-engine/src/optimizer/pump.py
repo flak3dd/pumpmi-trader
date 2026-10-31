@@ -21,6 +21,7 @@ import http.client
 import json
 import math
 import os
+import re
 import struct
 import time
 import urllib.error
@@ -64,6 +65,15 @@ CHAIN_PREFERENCE_SECONDS = 10.0
 LAUNCH_AGE_MAX_SECONDS = 20.0
 LAUNCH_READS_PER_CYCLE = 20
 PRIMARY_COOLDOWN_SECONDS = 300.0
+# pump.fun listing budget: shared with the main optimizer's feed from the same IP, so keep it small.
+# Created coins every 3rd cycle (~12 s, keeps launches inside the 20 s window), latest trades every
+# 6th cycle (~24 s); never both in one cycle: ~7.5 requests/minute. Verified reserve reads stay every cycle.
+LISTING_CREATED_EVERY = 3
+LISTING_TRADES_EVERY = 6
+LISTING_FRESH_SECONDS = 120.0   # entries need a listing (and so SOL/USD) at most this old
+LISTING_BACKOFF_BASE_SECONDS = 60.0   # after HTTP 403/429: 60 s, doubling ...
+LISTING_BACKOFF_MAX_SECONDS = 900.0   # ... up to 15 minutes
+LISTING_ERROR_PAUSE_SECONDS = 30.0    # other listing errors
 
 # Option-B substitutes for the holder gate
 CREATOR_MAX_PCT = 5.0
@@ -83,7 +93,7 @@ EXIT_SETS: dict[str, dict[str, Any]] = {
                soft_s=4 * 60, soft_below=5.0, hard_s=10 * 60, flatten=95.0, flow_flip=True),
 }
 ENTRY_SIGNALS = ("E1", "E2", "E3")
-DEFAULT_VARIANT = {"entry": "E2", "exit": "X2"}
+DEFAULT_VARIANT = {"entry": "E2", "exit": "X1"}  # pre-registered selection rule (5 s latency holdout), see README
 
 
 # ---------------------------------------------------------------- maths
@@ -338,14 +348,33 @@ class PumpMarket:
         self.last_change: dict[str, float] = {}
         self.sol_usd: float | None = None
         self.cycle = 0
+        self.listing_ok_at: float | None = None
+        self.listing_failures = 0
+        self.listing_pause_until = 0.0
+        self.listing_note: str | None = None
+        self.listing_requests = 0
 
     # -- listing
     def _listing(self, sort: str) -> list[dict[str, Any]]:
         url = f"{PUMP_FRONTEND_V3}/coins?offset=0&limit={LISTING_LIMIT}&sort={sort}&order=DESC&includeNsfw=false"
+        self.listing_requests += 1
         payload = self.http_get(url)
         if not isinstance(payload, list):
             raise SourceError("pump listing returned a non-list payload")
         return [row for row in payload if isinstance(row, dict) and row.get("mint")]
+
+    def _listing_due(self, now: float) -> str | None:
+        """At most one listing request per cycle, inside the budget and outside any backoff."""
+        if now < self.listing_pause_until:
+            return None
+        if self.listing_ok_at is None or self.cycle % LISTING_TRADES_EVERY == 1:
+            return "last_trade_timestamp"
+        if self.cycle % LISTING_CREATED_EVERY == 0:
+            return "created_timestamp"
+        return None
+
+    def listing_age(self, now: float) -> float | None:
+        return None if self.listing_ok_at is None else max(0.0, now - self.listing_ok_at)
 
     def _absorb_listing(self, rows: list[dict[str, Any]], now: float, sort: str) -> None:
         for row in rows:
@@ -461,16 +490,26 @@ class PumpMarket:
         now = self.clock() if now is None else float(now)
         self.cycle += 1
         batch = PumpBatch(at=now)
-        try:
-            rows = self._listing("last_trade_timestamp")
-            self._absorb_listing(rows, now, "last_trade_timestamp")
-            batch.listing_rows += len(rows)
-            if self.cycle % 2 == 1:
-                created = self._listing("created_timestamp")
-                self._absorb_listing(created, now, "created_timestamp")
-                batch.listing_rows += len(created)
-        except SourceError as exc:
-            batch.error = f"listing: {str(exc)[:120]}"
+        sort = self._listing_due(now)
+        if sort is not None:
+            try:
+                rows = self._listing(sort)
+                self._absorb_listing(rows, now, sort)
+                batch.listing_rows += len(rows)
+                self.listing_ok_at = now
+                self.listing_failures = 0
+                self.listing_note = None
+            except SourceError as exc:
+                text = str(exc)
+                if re.search(r"\b(403|429)\b", text):
+                    self.listing_failures += 1
+                    pause = min(LISTING_BACKOFF_MAX_SECONDS, LISTING_BACKOFF_BASE_SECONDS * 2 ** (self.listing_failures - 1))
+                else:
+                    pause = LISTING_ERROR_PAUSE_SECONDS
+                self.listing_pause_until = now + pause
+                self.listing_note = f"pump.fun listing paused {pause:.0f} s after: {text[:90]}"
+        if self.listing_note:
+            batch.error = self.listing_note
         self._maintain_hot(now, held)
         batch.hot = len(self.hot)
         accounts: list[tuple[str, str, str]] = []
@@ -620,6 +659,12 @@ def gate_report(market: PumpMarket, mint: str, point: dict[str, Any] | None, now
              f"{take:.1f}% of supply sold by {launch['age_s']}s after creation")
     else:
         gate("launch_take", f"Launch take ≤{LAUNCH_TAKE_MAX_PCT:g}%", "unknown", "launch not read within 20 s of creation")
+    listing_age = market.listing_age(now)
+    if listing_age is not None and listing_age <= LISTING_FRESH_SECONDS:
+        gate("listing_fresh", f"Market listing ≤{LISTING_FRESH_SECONDS:.0f} s old", "pass", f"listing {listing_age:.0f}s old")
+    else:
+        gate("listing_fresh", f"Market listing ≤{LISTING_FRESH_SECONDS:.0f} s old", "unknown",
+             market.listing_note or ("no listing yet" if listing_age is None else f"listing {listing_age:.0f}s old"))
     entered = mint in (state.get("entered") or {})
     gate("one_entry", "One entry per token", "fail" if entered else "pass", "already traded" if entered else "not traded yet")
     gate("capacity", f"Fewer than {MAX_OPEN} open", "pass" if open_count < MAX_OPEN else "fail", f"{open_count}/{MAX_OPEN} open or pending")

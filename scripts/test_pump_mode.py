@@ -74,8 +74,13 @@ class FakeChain:
         self.complete = False
         self.rpc_down = False
         self.listing_down = False
+        self.listing_error: str | None = None
+        self.blocked_calls = 0
 
     def listing(self, url: str) -> list[dict]:
+        if self.listing_error:
+            self.blocked_calls += 1
+            raise pump.SourceError(self.listing_error)
         if self.listing_down:
             raise pump.SourceError("listing down (test)")
         mc = mcap_usd(self.vs)
@@ -330,6 +335,53 @@ class PumpModeTests(unittest.TestCase):
         self.warm_then_pump(rt, chain)
         self.assertEqual(self.state()["pending"], [])
         self.assertIn("paused", self.state()["book"]["paused"])
+
+    def test_listing_budget_is_one_request_per_cycle_at_most(self) -> None:
+        chain = FakeChain()
+        calls: list[str] = []
+        listing = chain.listing
+
+        def counted(url: str) -> list[dict]:
+            calls.append("created" if "created_timestamp" in url else "trades")
+            return listing(url)
+
+        chain.listing = counted  # type: ignore[method-assign]
+        rt = self.runtime(chain)
+        for n in range(12):  # 48 s
+            self.cycle(rt, T0 + 2 + 4 * n)
+        self.assertEqual(calls.count("created"), 4)  # every ~12 s
+        self.assertEqual(calls.count("trades"), 2)   # every ~24 s
+        self.assertLessEqual(len(calls) / 48 * 60, 7.5)
+
+    def test_listing_403_backs_off_and_blocks_new_entries_but_keeps_reading_held(self) -> None:
+        chain = FakeChain()
+        rt = self.runtime(chain)
+        jump = self.warm_then_pump(rt, chain)
+        self.cycle(rt, jump + 4)  # entry filled
+        self.assertEqual(len(self.portfolio()["positions"]), 1)
+        chain.listing_error = "HTTPError: HTTP Error 403: Forbidden"
+        at = jump + 8
+        for _ in range(60):  # 4 minutes of cycles
+            self.cycle(rt, at)
+            at += 4
+        # 60 s, then 120 s, then 240 s backoff: three attempts in four minutes, not one per cycle
+        self.assertEqual(chain.blocked_calls, 3)
+        state = self.state()
+        self.assertIn("listing paused 240 s", state["source"]["error"])
+        self.assertAlmostEqual(state["source"]["lastRead"], at - 4, places=3)  # verified reserve reads continue
+        gates = {g["key"]: g for g in state["radar"][0]["gates"]}
+        self.assertEqual(gates["listing_fresh"]["status"], "unknown")
+        self.assertIn("listing paused", gates["listing_fresh"]["detail"])
+        # recovery: a successful listing clears the pause and the gate passes again
+        chain.listing_error = None
+        for _ in range(70):
+            self.cycle(rt, at)
+            at += 4
+        state = self.state()
+        self.assertIsNone(state["source"]["error"])
+        gates = {g["key"]: g for g in state["radar"][0]["gates"]} if state["radar"] else {}
+        if gates:
+            self.assertEqual(gates["listing_fresh"]["status"], "pass")
 
     def test_three_losses_halve_the_ticket(self) -> None:
         self.assertEqual(pump.ticket_for(0), 65.0)
