@@ -56,7 +56,8 @@ def _state(curve=40.0, sol=5_000_000_000):
 def _flow(buyers=16):
     return {
         "signed_quote_sol": 1.5, "buy_sol": 2.4, "sell_sol": 0.9, "imbalance": 2.6,
-        "unique_buyers": buyers, "top_buyer_pct": 8.0, "trades": buyers + 2,
+        "unique_buyers": buyers, "top_buyer_pct": 8.0, "top3_buyer_pct": 18.0,
+        "meaningful_buyers": buyers, "trades": buyers + 2,
     }
 
 
@@ -89,6 +90,11 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["v6_min_hist"] == 30
     assert STRAT["pos_check_s"] == 2.5
     assert STRAT["min_curve_pct"] == 30
+    assert STRAT["curve_fee_bps"] == 100
+    assert STRAT["flow_max_top3_pct"] == 45
+    assert STRAT["flow_meaningful_sol"] == 0.05
+    assert STRAT["flow_min_meaningful_buyers"] == 8
+    assert STRAT["flow_strong_meaningful_buyers"] == 12
     try:
         Feed({"mode": "live", "bankroll_usd": 100})
     except AssertionError:
@@ -209,6 +215,46 @@ def test_exits_emergency_vol_breakeven_and_flow_reversal(tmp_path: Path) -> None
         feed.apply_mark("FLOW", {"spot": 100, "real_sol": 9_600_000_000})
         assert "FLOW" not in feed.pos
         assert feed.ledger.fills[-1][5].startswith("flow exit")
+
+
+def test_distribution_gates_skip_before_a_paper_buy(tmp_path: Path) -> None:
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    concentrated = {
+        "signed_quote_sol": 6.0, "buy_sol": 10.0, "sell_sol": 4.0, "imbalance": 2.5,
+        "unique_buyers": 16, "top_buyer_pct": 19.0, "top3_buyer_pct": 54.0,
+        "meaningful_buyers": 16, "trades": 20,
+    }
+    dust = {
+        "signed_quote_sol": 0.22, "buy_sol": 0.32, "sell_sol": 0.10, "imbalance": 3.2,
+        "unique_buyers": 16, "top_buyer_pct": 6.0, "top3_buyer_pct": 19.0,
+        "meaningful_buyers": 0, "trades": 17,
+    }
+    holder = {"coin": _coin(symbol="WHALES", mint="whale-mint-0001")}
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(holder["coin"])):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since: concentrated
+        _run_watch(feed, holder["coin"], now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("flow top3")
+
+        now[0] = 1000.0
+        holder["coin"] = _coin(symbol="DUST", mint="dust-mint-0001")
+        feed.flow_for = lambda _coin, _since: dust
+        _run_watch(feed, holder["coin"], now)
+        assert not feed.pos
+        assert "meaningful" in feed.ledger.skips[-1][1]
+        assert feed.ledger.fills == []
+        assert STRAT["curve_fee_bps"] == 100
 
 
 def test_position_check_runs_before_the_scan(tmp_path: Path) -> None:

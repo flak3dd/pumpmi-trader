@@ -84,3 +84,93 @@ def test_signal_size_stays_inside_the_band():
     usd = size_for_signal(strength, STRAT)
     assert STRAT["size_min"] <= usd <= STRAT["size_max"]
     assert strength > 0.5
+
+
+def _distributed_base():
+    """Fifteen economically real buyers plus a smaller sell. Clears the v8 tape gate."""
+    trades = [{"side": "buy", "quote_sol": 0.1, "user": f"u{i}"} for i in range(16)]
+    trades.append({"side": "sell", "quote_sol": 0.4, "user": "s"})
+    return trades
+
+
+def test_top3_rejects_a_book_the_single_whale_cap_allows():
+    """Three wallets under 20% each can still own the tape. The previous gate bought that."""
+    trades = [
+        {"side": "buy", "quote_sol": 1.9, "user": "w1"},
+        {"side": "buy", "quote_sol": 1.8, "user": "w2"},
+        {"side": "buy", "quote_sol": 1.7, "user": "w3"},
+    ]
+    rest = 4.6
+    trades += [{"side": "buy", "quote_sol": rest / 12, "user": f"d{i}"} for i in range(12)]
+    trades.append({"side": "sell", "quote_sol": 4.0, "user": "seller"})
+    summary = summarize(trades)
+    assert summary["unique_buyers"] == 15
+    assert summary["top_buyer_pct"] <= STRAT["flow_max_whale_pct"]
+    assert summary["top3_buyer_pct"] > STRAT["flow_max_top3_pct"]
+    assert summary["meaningful_buyers"] >= STRAT["flow_min_meaningful_buyers"]
+    loose = {**STRAT, "flow_max_top3_pct": 100}
+    assert flow_allows(summary, loose)[0]
+    rejected, why = flow_allows(summary, STRAT)
+    assert not rejected and why.startswith("flow top3")
+
+
+def test_meaningful_buyers_reject_dust_that_inflates_the_unique_count():
+    """Sixteen dust wallets clear the unique-buyer and whale caps and still are not distributed demand."""
+    trades = [{"side": "buy", "quote_sol": 0.02, "user": f"u{i}"} for i in range(16)]
+    trades.append({"side": "sell", "quote_sol": 0.1, "user": "s"})
+    summary = summarize(trades)
+    assert summary["unique_buyers"] >= STRAT["flow_min_buyers"]
+    assert summary["top_buyer_pct"] < STRAT["flow_max_whale_pct"]
+    assert summary["top3_buyer_pct"] < STRAT["flow_max_top3_pct"]
+    assert summary["meaningful_buyers"] == 0
+    loose = {**STRAT, "flow_min_meaningful_buyers": 0, "flow_strong_meaningful_buyers": 0}
+    assert flow_allows(summary, loose)[0]
+    rejected, why = flow_allows(summary, STRAT)
+    assert not rejected and "meaningful" in why
+    # Two dust prints from the same wallet add up. Seven extra dust wallets keep the unique count legal.
+    repeated = [{"side": "buy", "quote_sol": 0.03, "user": f"u{i}"} for i in range(8) for _ in range(2)]
+    repeated += [{"side": "buy", "quote_sol": 0.02, "user": f"d{i}"} for i in range(7)]
+    repeated.append({"side": "sell", "quote_sol": 0.2, "user": "s"})
+    rolled = summarize(repeated)
+    assert rolled["unique_buyers"] == 15
+    assert rolled["meaningful_buyers"] == 8
+    assert flow_allows(rolled, STRAT)[0]
+
+
+def test_upper_band_requires_more_meaningful_buyers_and_threshold_is_configurable():
+    trades = _distributed_base()
+    summary = summarize(trades)
+    assert summary["meaningful_buyers"] == 16
+    assert flow_allows(summary, STRAT)[0]
+    # Enough unique wallets for the upper curve band, but only eight are economically real.
+    wide = summarize(
+        [{"side": "buy", "quote_sol": 0.1, "user": f"b{i}"} for i in range(8)]
+        + [{"side": "buy", "quote_sol": 0.02, "user": f"d{i}"} for i in range(20)]
+        + [{"side": "sell", "quote_sol": 0.3, "user": "s"}]
+    )
+    assert wide["unique_buyers"] >= STRAT["flow_strong_buyers"]
+    assert wide["meaningful_buyers"] == 8
+    assert flow_allows(wide, STRAT)[0]
+    rejected, why = flow_allows(wide, STRAT, strong=True)
+    assert not rejected and "meaningful buyers 8 < 12" in why
+    finer = summarize(trades, meaningful_sol=0.2)
+    assert finer["meaningful_buyers"] == 0
+    assert summarize(trades, meaningful_sol=0.05)["meaningful_buyers"] == 16
+
+
+def test_cleaner_distribution_sizes_larger_without_leaving_the_band():
+    slices = [0.2, 0.4, 0.7]
+    broad = dict(
+        unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
+        meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
+    )
+    tight = dict(broad, top3_buyer_pct=44, meaningful_buyers=8)
+    high = signal_strength(broad, slices, STRAT)
+    low = signal_strength(tight, slices, STRAT)
+    assert high > low
+    assert STRAT["size_min"] <= size_for_signal(low, STRAT) <= size_for_signal(high, STRAT) <= STRAT["size_max"]
+    # An unmeasured distribution cannot take the high-size credit.
+    unmeasured = dict(broad)
+    unmeasured.pop("top3_buyer_pct")
+    unmeasured.pop("meaningful_buyers")
+    assert signal_strength(unmeasured, slices, STRAT) < high
