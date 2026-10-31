@@ -1,0 +1,37 @@
+"""v6 similarity gate (PAPER ONLY): compare candidate social+trading features to historical paper exits."""
+import json, math, time
+from pathlib import Path
+HIST = Path("out/feature_history.jsonl")
+
+def append(rec):
+    HIST.parent.mkdir(exist_ok=True)
+    with HIST.open("a") as f: f.write(json.dumps({**rec, "ts": rec.get("ts", time.time())}) + "\n")
+
+def load():
+    if not HIST.exists(): return []
+    out = []
+    for l in HIST.read_text().splitlines():
+        try: out.append(json.loads(l))
+        except Exception: pass
+    return out
+
+def vec(r):
+    g = lambda k: float(r.get(k) or 0)
+    return [g("curve_pct") / 100, min(g("mcap") / 250_000, 1), min(g("replies") / 20, 1), g("top10_pct") / 100,
+            g("dev_pct") / 100, g("bundle_pct") / 100, max(-1, min(g("rise_pts") / 10, 1)),
+            g("sentiment_0_100") / 100, math.log1p(g("mention_volume")) / 10]
+
+def cos(a, b):
+    na = math.sqrt(sum(x * x for x in a)); nb = math.sqrt(sum(x * x for x in b))
+    return sum(x * y for x, y in zip(a, b)) / (na * nb) if na and nb else 0.0
+
+def score(cand, min_n=3):
+    """Returns (score or None if inconclusive, n_win, n_loss). Weighted by |pnl_pct|."""
+    hist = [r for r in load() if r.get("side") == "EXIT" and r.get("sentiment_0_100") is not None and r.get("pnl_pct") is not None]
+    win = [r for r in hist if r["pnl_pct"] > 0]; loss = [r for r in hist if r["pnl_pct"] <= 0]
+    if len(hist) < min_n or not win or not loss: return None, len(win), len(loss)
+    v = vec(cand)
+    def wmean(rs):
+        w = [abs(r["pnl_pct"]) + 1 for r in rs]
+        return sum(cos(v, vec(r)) * wi for r, wi in zip(rs, w)) / sum(w)
+    return round(wmean(win) - wmean(loss), 3), len(win), len(loss)

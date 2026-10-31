@@ -1,0 +1,15 @@
+ts,symbol,reason,forever
+1793355657.0436277,RAGEY,dev holds 31% > 10%,False
+1793355657.8690636,LUMEN,low mentions (18) | x positive,False
+1793355659.8902204,FLUX,low mentions (93) | x positive,False
+1793355664.4051318,HALO,same dev as known rug (skip forever),True
+1793355747.7454357,RAGEY,dev holds 31% > 10%,False
+1793355749.007102,LUMEN,low mentions (18) | x positive,False
+1793355751.711895,FLUX,low mentions (93) | x positive,False
+1793355755.301937,HALO,same dev as known rug (skip forever),True
+1793355758.6137452,FUDZ,low mentions (2) | no platform signal,False
+1793355761.3789983,TRAP,honeypot flag,False
+1793355763.2356482,EXITD,dev sold,False
+1793355769.5022085,QUARK,bundled 37% > 25%,False
+1793355771.9904828,PIXA,low mentions (63) | youtube volume spike + x positive + youtube positive,False
+1793355775.1571014,SOLO,weak sentiment 50.7/100 | youtube volume spike + tiktok negative + youtube positive,False

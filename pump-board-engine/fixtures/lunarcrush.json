@@ -1,0 +1,1531 @@
+{
+ "_coins_list": {
+  "data": []
+ },
+ "zeph": {
+  "topic": {
+   "data": {
+    "topic": "zeph",
+    "title": "ZEPH",
+    "trend": "up",
+    "types_count": {
+     "tweet": 1200,
+     "reddit-post": 90,
+     "youtube-video": 15,
+     "tiktok-video": 60,
+     "instagram-post": 30,
+     "news": 4
+    },
+    "types_interactions": {
+     "tweet": 42000,
+     "reddit-post": 3150,
+     "youtube-video": 525,
+     "tiktok-video": 2100,
+     "instagram-post": 1050,
+     "news": 140
+    },
+    "types_sentiment": {
+     "tweet": 78,
+     "reddit-post": 70,
+     "youtube-video": 72,
+     "tiktok-video": 80,
+     "instagram-post": 75,
+     "news": 60
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 936,
+      "neutral": 0,
+      "negative": 264
+     },
+     "reddit-post": {
+      "positive": 63,
+      "neutral": 0,
+      "negative": 27
+     },
+     "youtube-video": {
+      "positive": 10,
+      "neutral": 0,
+      "negative": 5
+     },
+     "tiktok-video": {
+      "positive": 48,
+      "neutral": 0,
+      "negative": 12
+     },
+     "instagram-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 8
+     },
+     "news": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 2
+     }
+    },
+    "interactions_24h": 48965,
+    "num_posts": 1399,
+    "num_contributors": 466
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$ZEPH sending 🚀 early gem (tweet)",
+     "interactions_24h": 12000,
+     "post_sentiment": 3.9
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$ZEPH sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 900,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$ZEPH sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 150,
+     "post_sentiment": 3.6
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$ZEPH sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 600,
+     "post_sentiment": 4.0
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$ZEPH sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 300,
+     "post_sentiment": 3.8
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "ZEPH memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "ragey": {
+  "topic": {
+   "data": {
+    "topic": "ragey",
+    "title": "RAGEY",
+    "trend": "down",
+    "types_count": {
+     "tweet": 400,
+     "reddit-post": 50,
+     "youtube-video": 5,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 1
+    },
+    "types_interactions": {
+     "tweet": 14000,
+     "reddit-post": 1750,
+     "youtube-video": 175,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 35
+    },
+    "types_sentiment": {
+     "tweet": 50,
+     "reddit-post": 45,
+     "youtube-video": 50,
+     "tiktok-video": 55,
+     "instagram-post": 50,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 200,
+      "neutral": 0,
+      "negative": 200
+     },
+     "reddit-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 28
+     },
+     "youtube-video": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "tiktok-video": {
+      "positive": 16,
+      "neutral": 0,
+      "negative": 14
+     },
+     "instagram-post": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 5
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 17360,
+    "num_posts": 496,
+    "num_contributors": 165
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$RAGEY looks like a rug 🚩 (tweet)",
+     "interactions_24h": 4000,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$RAGEY looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 500,
+     "post_sentiment": 2.2
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$RAGEY looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$RAGEY sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$RAGEY looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 2.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "RAGEY memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "lumen": {
+  "topic": {
+   "data": {
+    "topic": "lumen",
+    "title": "LUMEN",
+    "trend": "up",
+    "types_count": {
+     "tweet": 500,
+     "reddit-post": 60,
+     "youtube-video": 10,
+     "tiktok-video": 40,
+     "instagram-post": 20,
+     "news": 3
+    },
+    "types_interactions": {
+     "tweet": 17500,
+     "reddit-post": 2100,
+     "youtube-video": 350,
+     "tiktok-video": 1400,
+     "instagram-post": 700,
+     "news": 105
+    },
+    "types_sentiment": {
+     "tweet": 70,
+     "reddit-post": 66,
+     "youtube-video": 65,
+     "tiktok-video": 74,
+     "instagram-post": 70,
+     "news": 55
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 350,
+      "neutral": 0,
+      "negative": 150
+     },
+     "reddit-post": {
+      "positive": 39,
+      "neutral": 0,
+      "negative": 21
+     },
+     "youtube-video": {
+      "positive": 6,
+      "neutral": 0,
+      "negative": 4
+     },
+     "tiktok-video": {
+      "positive": 29,
+      "neutral": 0,
+      "negative": 11
+     },
+     "instagram-post": {
+      "positive": 14,
+      "neutral": 0,
+      "negative": 6
+     },
+     "news": {
+      "positive": 1,
+      "neutral": 0,
+      "negative": 2
+     }
+    },
+    "interactions_24h": 22155,
+    "num_posts": 633,
+    "num_contributors": 211
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$LUMEN sending 🚀 early gem (tweet)",
+     "interactions_24h": 5000,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$LUMEN sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 600,
+     "post_sentiment": 3.3
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$LUMEN sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 100,
+     "post_sentiment": 3.2
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$LUMEN sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 400,
+     "post_sentiment": 3.7
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$LUMEN sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 200,
+     "post_sentiment": 3.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "LUMEN memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "flux": {
+  "topic": {
+   "data": {
+    "topic": "flux",
+    "title": "FLUX",
+    "trend": "down",
+    "types_count": {
+     "tweet": 300,
+     "reddit-post": 40,
+     "youtube-video": 8,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 2
+    },
+    "types_interactions": {
+     "tweet": 10500,
+     "reddit-post": 1400,
+     "youtube-video": 280,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 70
+    },
+    "types_sentiment": {
+     "tweet": 62,
+     "reddit-post": 58,
+     "youtube-video": 60,
+     "tiktok-video": 64,
+     "instagram-post": 60,
+     "news": 55
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 186,
+      "neutral": 0,
+      "negative": 114
+     },
+     "reddit-post": {
+      "positive": 23,
+      "neutral": 0,
+      "negative": 17
+     },
+     "youtube-video": {
+      "positive": 4,
+      "neutral": 0,
+      "negative": 4
+     },
+     "tiktok-video": {
+      "positive": 19,
+      "neutral": 0,
+      "negative": 11
+     },
+     "instagram-post": {
+      "positive": 6,
+      "neutral": 0,
+      "negative": 4
+     },
+     "news": {
+      "positive": 1,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 13650,
+    "num_posts": 390,
+    "num_contributors": 130
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$FLUX sending 🚀 early gem (tweet)",
+     "interactions_24h": 3000,
+     "post_sentiment": 3.1
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$FLUX sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 400,
+     "post_sentiment": 2.9
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$FLUX sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 80,
+     "post_sentiment": 3.0
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$FLUX sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 3.2
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$FLUX sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 3.0
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "FLUX memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "grit": {
+  "topic": {
+   "data": {
+    "topic": "grit",
+    "title": "GRIT",
+    "trend": "up",
+    "types_count": {
+     "tweet": 4000,
+     "reddit-post": 300,
+     "youtube-video": 40,
+     "tiktok-video": 500,
+     "instagram-post": 90,
+     "news": 12
+    },
+    "types_interactions": {
+     "tweet": 140000,
+     "reddit-post": 10500,
+     "youtube-video": 1400,
+     "tiktok-video": 17500,
+     "instagram-post": 3150,
+     "news": 420
+    },
+    "types_sentiment": {
+     "tweet": 88,
+     "reddit-post": 72,
+     "youtube-video": 75,
+     "tiktok-video": 85,
+     "instagram-post": 80,
+     "news": 70
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 3520,
+      "neutral": 0,
+      "negative": 480
+     },
+     "reddit-post": {
+      "positive": 216,
+      "neutral": 0,
+      "negative": 84
+     },
+     "youtube-video": {
+      "positive": 30,
+      "neutral": 0,
+      "negative": 10
+     },
+     "tiktok-video": {
+      "positive": 425,
+      "neutral": 0,
+      "negative": 75
+     },
+     "instagram-post": {
+      "positive": 72,
+      "neutral": 0,
+      "negative": 18
+     },
+     "news": {
+      "positive": 8,
+      "neutral": 0,
+      "negative": 4
+     }
+    },
+    "interactions_24h": 172970,
+    "num_posts": 4942,
+    "num_contributors": 1647
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$GRIT sending 🚀 early gem (tweet)",
+     "interactions_24h": 40000,
+     "post_sentiment": 4.4
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$GRIT sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 3000,
+     "post_sentiment": 3.6
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$GRIT sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 400,
+     "post_sentiment": 3.8
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$GRIT sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 5000,
+     "post_sentiment": 4.2
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$GRIT sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 900,
+     "post_sentiment": 4.0
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "GRIT memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "halo": {
+  "topic": {
+   "data": {
+    "topic": "halo",
+    "title": "HALO",
+    "trend": "down",
+    "types_count": {
+     "tweet": 400,
+     "reddit-post": 50,
+     "youtube-video": 5,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 1
+    },
+    "types_interactions": {
+     "tweet": 14000,
+     "reddit-post": 1750,
+     "youtube-video": 175,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 35
+    },
+    "types_sentiment": {
+     "tweet": 50,
+     "reddit-post": 45,
+     "youtube-video": 50,
+     "tiktok-video": 55,
+     "instagram-post": 50,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 200,
+      "neutral": 0,
+      "negative": 200
+     },
+     "reddit-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 28
+     },
+     "youtube-video": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "tiktok-video": {
+      "positive": 16,
+      "neutral": 0,
+      "negative": 14
+     },
+     "instagram-post": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 5
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 17360,
+    "num_posts": 496,
+    "num_contributors": 165
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$HALO looks like a rug 🚩 (tweet)",
+     "interactions_24h": 4000,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$HALO looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 500,
+     "post_sentiment": 2.2
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$HALO looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$HALO sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$HALO looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 2.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "HALO memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "meh": {
+  "topic": {
+   "data": {
+    "topic": "meh",
+    "title": "MEH",
+    "trend": "down",
+    "types_count": {
+     "tweet": 40,
+     "reddit-post": 5,
+     "youtube-video": 1,
+     "tiktok-video": 8,
+     "instagram-post": 2,
+     "news": 0
+    },
+    "types_interactions": {
+     "tweet": 1400,
+     "reddit-post": 175,
+     "youtube-video": 35,
+     "tiktok-video": 280,
+     "instagram-post": 70,
+     "news": 0
+    },
+    "types_sentiment": {
+     "tweet": 60,
+     "reddit-post": 55,
+     "youtube-video": 50,
+     "tiktok-video": 60,
+     "instagram-post": 55,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 24,
+      "neutral": 0,
+      "negative": 16
+     },
+     "reddit-post": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "youtube-video": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     },
+     "tiktok-video": {
+      "positive": 4,
+      "neutral": 0,
+      "negative": 4
+     },
+     "instagram-post": {
+      "positive": 1,
+      "neutral": 0,
+      "negative": 1
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 0
+     }
+    },
+    "interactions_24h": 1960,
+    "num_posts": 56,
+    "num_contributors": 18
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$MEH sending 🚀 early gem (tweet)",
+     "interactions_24h": 400,
+     "post_sentiment": 3.0
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$MEH sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$MEH looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 10,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$MEH sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 80,
+     "post_sentiment": 3.0
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$MEH sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 20,
+     "post_sentiment": 2.8
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "MEH memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "fudz": {
+  "topic": {
+   "data": {
+    "topic": "fudz",
+    "title": "FUDZ",
+    "trend": "down",
+    "types_count": {
+     "tweet": 600,
+     "reddit-post": 120,
+     "youtube-video": 10,
+     "tiktok-video": 40,
+     "instagram-post": 15,
+     "news": 3
+    },
+    "types_interactions": {
+     "tweet": 21000,
+     "reddit-post": 4200,
+     "youtube-video": 350,
+     "tiktok-video": 1400,
+     "instagram-post": 525,
+     "news": 105
+    },
+    "types_sentiment": {
+     "tweet": 22,
+     "reddit-post": 18,
+     "youtube-video": 30,
+     "tiktok-video": 25,
+     "instagram-post": 30,
+     "news": 35
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 132,
+      "neutral": 0,
+      "negative": 468
+     },
+     "reddit-post": {
+      "positive": 21,
+      "neutral": 0,
+      "negative": 99
+     },
+     "youtube-video": {
+      "positive": 3,
+      "neutral": 0,
+      "negative": 7
+     },
+     "tiktok-video": {
+      "positive": 10,
+      "neutral": 0,
+      "negative": 30
+     },
+     "instagram-post": {
+      "positive": 4,
+      "neutral": 0,
+      "negative": 11
+     },
+     "news": {
+      "positive": 1,
+      "neutral": 0,
+      "negative": 2
+     }
+    },
+    "interactions_24h": 27580,
+    "num_posts": 788,
+    "num_contributors": 262
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$FUDZ looks like a rug 🚩 (tweet)",
+     "interactions_24h": 6000,
+     "post_sentiment": 1.1
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$FUDZ looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 1200,
+     "post_sentiment": 0.9
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$FUDZ looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 100,
+     "post_sentiment": 1.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$FUDZ looks like a rug 🚩 (tiktok-video)",
+     "interactions_24h": 400,
+     "post_sentiment": 1.2
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$FUDZ looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 150,
+     "post_sentiment": 1.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "FUDZ memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "trap": {
+  "topic": {
+   "data": {
+    "topic": "trap",
+    "title": "TRAP",
+    "trend": "down",
+    "types_count": {
+     "tweet": 400,
+     "reddit-post": 50,
+     "youtube-video": 5,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 1
+    },
+    "types_interactions": {
+     "tweet": 14000,
+     "reddit-post": 1750,
+     "youtube-video": 175,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 35
+    },
+    "types_sentiment": {
+     "tweet": 50,
+     "reddit-post": 45,
+     "youtube-video": 50,
+     "tiktok-video": 55,
+     "instagram-post": 50,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 200,
+      "neutral": 0,
+      "negative": 200
+     },
+     "reddit-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 28
+     },
+     "youtube-video": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "tiktok-video": {
+      "positive": 16,
+      "neutral": 0,
+      "negative": 14
+     },
+     "instagram-post": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 5
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 17360,
+    "num_posts": 496,
+    "num_contributors": 165
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$TRAP looks like a rug 🚩 (tweet)",
+     "interactions_24h": 4000,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$TRAP looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 500,
+     "post_sentiment": 2.2
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$TRAP looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$TRAP sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$TRAP looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 2.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "TRAP memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "exitd": {
+  "topic": {
+   "data": {
+    "topic": "exitd",
+    "title": "EXITD",
+    "trend": "down",
+    "types_count": {
+     "tweet": 400,
+     "reddit-post": 50,
+     "youtube-video": 5,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 1
+    },
+    "types_interactions": {
+     "tweet": 14000,
+     "reddit-post": 1750,
+     "youtube-video": 175,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 35
+    },
+    "types_sentiment": {
+     "tweet": 50,
+     "reddit-post": 45,
+     "youtube-video": 50,
+     "tiktok-video": 55,
+     "instagram-post": 50,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 200,
+      "neutral": 0,
+      "negative": 200
+     },
+     "reddit-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 28
+     },
+     "youtube-video": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "tiktok-video": {
+      "positive": 16,
+      "neutral": 0,
+      "negative": 14
+     },
+     "instagram-post": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 5
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 17360,
+    "num_posts": 496,
+    "num_contributors": 165
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$EXITD looks like a rug 🚩 (tweet)",
+     "interactions_24h": 4000,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$EXITD looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 500,
+     "post_sentiment": 2.2
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$EXITD looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$EXITD sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$EXITD looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 2.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "EXITD memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "kappa": {
+  "topic": {
+   "data": {
+    "topic": "kappa",
+    "title": "KAPPA",
+    "trend": "up",
+    "types_count": {
+     "tweet": 700,
+     "reddit-post": 150,
+     "youtube-video": 20,
+     "tiktok-video": 90,
+     "instagram-post": 40,
+     "news": 5
+    },
+    "types_interactions": {
+     "tweet": 24500,
+     "reddit-post": 5250,
+     "youtube-video": 700,
+     "tiktok-video": 3150,
+     "instagram-post": 1400,
+     "news": 175
+    },
+    "types_sentiment": {
+     "tweet": 74,
+     "reddit-post": 80,
+     "youtube-video": 70,
+     "tiktok-video": 70,
+     "instagram-post": 68,
+     "news": 62
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 518,
+      "neutral": 0,
+      "negative": 182
+     },
+     "reddit-post": {
+      "positive": 120,
+      "neutral": 0,
+      "negative": 30
+     },
+     "youtube-video": {
+      "positive": 14,
+      "neutral": 0,
+      "negative": 6
+     },
+     "tiktok-video": {
+      "positive": 63,
+      "neutral": 0,
+      "negative": 27
+     },
+     "instagram-post": {
+      "positive": 27,
+      "neutral": 0,
+      "negative": 13
+     },
+     "news": {
+      "positive": 3,
+      "neutral": 0,
+      "negative": 2
+     }
+    },
+    "interactions_24h": 35175,
+    "num_posts": 1005,
+    "num_contributors": 335
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$KAPPA sending 🚀 early gem (tweet)",
+     "interactions_24h": 7000,
+     "post_sentiment": 3.7
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$KAPPA sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 1500,
+     "post_sentiment": 4.0
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$KAPPA sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 200,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$KAPPA sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 900,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$KAPPA sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 400,
+     "post_sentiment": 3.4
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "KAPPA memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "quark": {
+  "topic": {
+   "data": {
+    "topic": "quark",
+    "title": "QUARK",
+    "trend": "down",
+    "types_count": {
+     "tweet": 400,
+     "reddit-post": 50,
+     "youtube-video": 5,
+     "tiktok-video": 30,
+     "instagram-post": 10,
+     "news": 1
+    },
+    "types_interactions": {
+     "tweet": 14000,
+     "reddit-post": 1750,
+     "youtube-video": 175,
+     "tiktok-video": 1050,
+     "instagram-post": 350,
+     "news": 35
+    },
+    "types_sentiment": {
+     "tweet": 50,
+     "reddit-post": 45,
+     "youtube-video": 50,
+     "tiktok-video": 55,
+     "instagram-post": 50,
+     "news": 50
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 200,
+      "neutral": 0,
+      "negative": 200
+     },
+     "reddit-post": {
+      "positive": 22,
+      "neutral": 0,
+      "negative": 28
+     },
+     "youtube-video": {
+      "positive": 2,
+      "neutral": 0,
+      "negative": 3
+     },
+     "tiktok-video": {
+      "positive": 16,
+      "neutral": 0,
+      "negative": 14
+     },
+     "instagram-post": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 5
+     },
+     "news": {
+      "positive": 0,
+      "neutral": 0,
+      "negative": 1
+     }
+    },
+    "interactions_24h": 17360,
+    "num_posts": 496,
+    "num_contributors": 165
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$QUARK looks like a rug 🚩 (tweet)",
+     "interactions_24h": 4000,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$QUARK looks like a rug 🚩 (reddit-post)",
+     "interactions_24h": 500,
+     "post_sentiment": 2.2
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$QUARK looks like a rug 🚩 (youtube-video)",
+     "interactions_24h": 50,
+     "post_sentiment": 2.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$QUARK sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 2.8
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$QUARK looks like a rug 🚩 (instagram-post)",
+     "interactions_24h": 100,
+     "post_sentiment": 2.5
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "QUARK memecoin faces rug accusations on pump.fun"
+    }
+   ]
+  }
+ },
+ "pixa": {
+  "topic": {
+   "data": {
+    "topic": "pixa",
+    "title": "PIXA",
+    "trend": "up",
+    "types_count": {
+     "tweet": 3000,
+     "reddit-post": 200,
+     "youtube-video": 30,
+     "tiktok-video": 4100,
+     "instagram-post": 150,
+     "news": 6
+    },
+    "types_interactions": {
+     "tweet": 105000,
+     "reddit-post": 7000,
+     "youtube-video": 1050,
+     "tiktok-video": 143500,
+     "instagram-post": 5250,
+     "news": 210
+    },
+    "types_sentiment": {
+     "tweet": 80,
+     "reddit-post": 68,
+     "youtube-video": 70,
+     "tiktok-video": 90,
+     "instagram-post": 82,
+     "news": 60
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 2400,
+      "neutral": 0,
+      "negative": 600
+     },
+     "reddit-post": {
+      "positive": 136,
+      "neutral": 0,
+      "negative": 64
+     },
+     "youtube-video": {
+      "positive": 21,
+      "neutral": 0,
+      "negative": 9
+     },
+     "tiktok-video": {
+      "positive": 3690,
+      "neutral": 0,
+      "negative": 410
+     },
+     "instagram-post": {
+      "positive": 123,
+      "neutral": 0,
+      "negative": 27
+     },
+     "news": {
+      "positive": 3,
+      "neutral": 0,
+      "negative": 3
+     }
+    },
+    "interactions_24h": 262010,
+    "num_posts": 7486,
+    "num_contributors": 2495
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$PIXA sending 🚀 early gem (tweet)",
+     "interactions_24h": 30000,
+     "post_sentiment": 4.0
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$PIXA sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 2000,
+     "post_sentiment": 3.4
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$PIXA sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 300,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$PIXA sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 41000,
+     "post_sentiment": 4.5
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$PIXA sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 1500,
+     "post_sentiment": 4.1
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "PIXA memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ },
+ "solo": {
+  "topic": {
+   "data": {
+    "topic": "solo",
+    "title": "SOLO",
+    "trend": "up",
+    "types_count": {
+     "tweet": 1500,
+     "reddit-post": 180,
+     "youtube-video": 25,
+     "tiktok-video": 300,
+     "instagram-post": 70,
+     "news": 9
+    },
+    "types_interactions": {
+     "tweet": 52500,
+     "reddit-post": 6300,
+     "youtube-video": 875,
+     "tiktok-video": 10500,
+     "instagram-post": 2450,
+     "news": 315
+    },
+    "types_sentiment": {
+     "tweet": 76,
+     "reddit-post": 74,
+     "youtube-video": 70,
+     "tiktok-video": 78,
+     "instagram-post": 72,
+     "news": 66
+    },
+    "types_sentiment_detail": {
+     "tweet": {
+      "positive": 1140,
+      "neutral": 0,
+      "negative": 360
+     },
+     "reddit-post": {
+      "positive": 133,
+      "neutral": 0,
+      "negative": 47
+     },
+     "youtube-video": {
+      "positive": 17,
+      "neutral": 0,
+      "negative": 8
+     },
+     "tiktok-video": {
+      "positive": 234,
+      "neutral": 0,
+      "negative": 66
+     },
+     "instagram-post": {
+      "positive": 50,
+      "neutral": 0,
+      "negative": 20
+     },
+     "news": {
+      "positive": 5,
+      "neutral": 0,
+      "negative": 4
+     }
+    },
+    "interactions_24h": 72940,
+    "num_posts": 2084,
+    "num_contributors": 694
+   }
+  },
+  "posts": {
+   "data": [
+    {
+     "post_type": "tweet",
+     "post_title": "$SOLO sending 🚀 early gem (tweet)",
+     "interactions_24h": 15000,
+     "post_sentiment": 3.8
+    },
+    {
+     "post_type": "reddit-post",
+     "post_title": "$SOLO sending 🚀 early gem (reddit-post)",
+     "interactions_24h": 1800,
+     "post_sentiment": 3.7
+    },
+    {
+     "post_type": "youtube-video",
+     "post_title": "$SOLO sending 🚀 early gem (youtube-video)",
+     "interactions_24h": 250,
+     "post_sentiment": 3.5
+    },
+    {
+     "post_type": "tiktok-video",
+     "post_title": "$SOLO sending 🚀 early gem (tiktok-video)",
+     "interactions_24h": 3000,
+     "post_sentiment": 3.9
+    },
+    {
+     "post_type": "instagram-post",
+     "post_title": "$SOLO sending 🚀 early gem (instagram-post)",
+     "interactions_24h": 700,
+     "post_sentiment": 3.6
+    }
+   ]
+  },
+  "news": {
+   "data": [
+    {
+     "post_title": "SOLO memecoin surges as social volume climbs on pump.fun"
+    }
+   ]
+  }
+ }
+}

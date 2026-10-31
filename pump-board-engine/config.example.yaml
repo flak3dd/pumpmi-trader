@@ -1,0 +1,25 @@
+mode: paper            # paper | live  (live is a refusing stub)
+bankroll_usd: 1500
+position_usd: 320
+goal_multiple: 4.0     # close all at 4x bankroll
+take_profit_pct: 100   # sell holding at +100% unless momentum
+stop_loss_pct: -30
+rules:
+  max_dev_pct: 10
+  max_bundle_pct: 25
+  min_posts_15m: 20
+  min_sentiment: 0.1
+social:
+  primary: lunarcrush  # fixture | lunarcrush | x_api | grok_mcp
+  platforms: [x, reddit, youtube, tiktok, instagram, news]
+  min_mentions: 200    # LunarCrush num posts across chosen platforms
+  min_sentiment: 55    # LunarCrush 0-100 scale (50 = neutral)
+  lunarcrush_fixture: fixtures/lunarcrush.json   # used ONLY when LUNARCRUSH_API_KEY is unset
+  fixture_path: fixtures/posts.json              # for primary: fixture
+holders:
+  source: fixture      # fixture | helius
+  fixture_path: fixtures/coins.json
+paths:
+  ledger_dir: out/ledger
+  board_json: out/board.json
+  known_rugs: fixtures/known_rugs.json

@@ -1,0 +1,170 @@
+"""Continuous PAPER feed on live market data. pump.fun public API (new coins + live mcap prices),
+Solana public RPC (top-holder concentration, best-effort), LunarCrush live social. NEVER signs/sends."""
+import json, os, time, signal, traceback, urllib.request
+from pathlib import Path
+from .config import load
+from .aggregators.lunarcrush import LunarCrushClient, LunarCrushError
+from .aggregators.fuse import fuse, PLATFORMS
+from .ledger import Ledger
+from .kanban_state import Board
+
+PF = "https://frontend-api-v3.pump.fun"; RPC = "https://api.mainnet-beta.solana.com"
+UA = {"User-Agent": "Mozilla/5.0 (PumpBoardEngine paper)", "Accept": "application/json"}
+# Strategy v2 (optimised 2026-10-30). Paper only.
+STRAT = dict(min_curve_pct=25, max_curve_pct=90, max_mcap_usd=150_000, momentum_min_replies=3, momentum_size_mult=0.5,
+             stop_loss_pct=-18, trail_arm_pct=12, trail_giveback_pct=12, flat_exit_s=600, flat_exit_below_pct=5,
+             hard_exit_s=1800)
+
+def http(url, body=None, timeout=12):
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body else None,
+                                 headers={**UA, **({"Content-Type": "application/json"} if body else {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r: return json.load(r)
+
+def load_env(p=".env"):
+    if Path(p).exists():
+        for l in Path(p).read_text().splitlines():
+            if "=" in l and not l.startswith("#"):
+                k, v = l.split("=", 1)
+                if v.strip(): os.environ.setdefault(k.strip(), v.strip())
+
+class Feed:
+    def __init__(self, cfg):
+        assert cfg["mode"] == "paper", "live feed is PAPER ONLY"
+        self.cfg = cfg; self.bank = cfg["bankroll_usd"]; self.cash = self.bank
+        self.pos = {}; self.seen = set(); self.board = Board(); self.log = []
+        self.ledger = Ledger("out/ledger_live"); self.lc = LunarCrushClient()
+        self.lc_backoff = 0; self.stats = dict(ticks=0, scanned=0, buys=0, wins=0, losses=0, skips=0, realized=0.0)
+        self.lc_cache = {}; self.traded = set(); self.restore()
+    def restore(self):
+        """Rebuild cash/realized/open positions from the live ledger so restarts keep stats continuous."""
+        import csv
+        f = Path("out/ledger_live/fills.csv")
+        if not f.exists(): return
+        for row in csv.DictReader(f.open()):
+            k = row["symbol"]; usd = float(row["usd"]); self.traded.add(k)
+            if row["side"] == "BUY":
+                self.cash -= usd; self.stats["buys"] += 1
+                self.pos[k] = dict(mint=None, usd=usd, entry=float(row["price"]) or 1, peak=float(row["price"]) or 1,
+                                   t=float(row["ts"]), creator=None, key=k)
+            elif row["side"] == "SELL":
+                pnl = float(row["pnl"]); self.cash += usd; self.stats["realized"] += pnl
+                self.stats["wins" if pnl > 0 else "losses"] += 1; self.pos.pop(k, None)
+        try:
+            bj = json.loads(Path("out/board.json").read_text())
+            mints = {c["symbol"]: c.get("mint") for col in bj.get("columns", {}).values() for c in col}
+        except Exception: mints = {}
+        for k in list(self.pos):
+            self.pos[k]["mint"] = mints.get(k)
+            if not self.pos[k]["mint"]: self.pos.pop(k)  # can't price it; leave as-is in ledger
+            else: self.board.put(k, "holding", verdict="BUY", reason="restored from ledger", pnl=0, pnl_pct=0)
+        # orphan BUYs from earlier restarts (no SELL, not on board) are ignored; cash = bank + realized - open
+        self.cash = self.bank + self.stats["realized"] - sum(p["usd"] for p in self.pos.values())
+        self.restored = list(self.pos)
+    def ev(self, msg):
+        line = time.strftime("%H:%M:%S") + " " + msg; print(line, flush=True); self.log = ([line] + self.log)[:60]
+    def mcap(self, mint):
+        return float(http(f"{PF}/coins-v2/{mint}").get("usd_market_cap") or 0)
+    def holders(self, c):
+        try:
+            r = http(RPC, {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [c["mint"]]})
+            accts = [float(a["uiAmount"] or 0) for a in r["result"]["value"]]
+            sup = float(c.get("total_supply") or 1e15) / 10 ** int(c.get("base_decimals", 6))
+            rest = sorted(accts, reverse=True)[1:]  # drop largest = bonding curve
+            return round(100 * rest[0] / sup, 1) if rest else 0, round(100 * sum(rest[:5]) / sup, 1)
+        except Exception: return None, None
+    def social(self, sym):
+        if sym in self.lc_cache: return self.lc_cache[sym]
+        if time.time() < self.lc_backoff: return None
+        try: snap = fuse(sym, self.lc.bundle(sym), PLATFORMS).to_dict()
+        except LunarCrushError as e:
+            s = str(e)
+            if s.startswith("429") or "403" in s[:4]: self.lc_backoff = time.time() + 60; self.ev(f"LunarCrush {s[:3]} -> backoff 60s")
+            snap = None
+        except Exception: snap = None
+        self.lc_cache[sym] = snap; return snap
+    def evaluate(self, c):
+        sym = (c.get("symbol") or "?")[:10].upper(); mint = c["mint"]; key = f"{sym}·{mint[:4]}"
+        self.stats["scanned"] += 1
+        mc = float(c.get("usd_market_cap") or 0); curve = min(100, round(100 * mc / 69000, 1))
+        top, bund = self.holders(c); snap = self.social(sym)
+        info = dict(mint=mint, name=c.get("name"), mcap=round(mc), curve_pct=curve, dev_pct=top, bundle_pct=bund,
+                    replies=c.get("reply_count", 0), ts_seen=time.time())
+        if snap: info.update(sentiment_0_100=snap["sentiment_0_100"], mentions=snap["mention_volume"],
+                             by_platform=snap["by_platform"], social_signal=" + ".join(snap["reasons"][:3]))
+        self.board.put(key, "checking", **info)
+        r = self.cfg["rules"]; sc = self.cfg["social"]; reason = None; forever = False; E = STRAT
+        strong_social = bool(snap and snap["mention_volume"] >= sc["min_mentions"] and snap["sentiment_0_100"] >= sc["min_sentiment"])
+        if c.get("creator") in self.ledger.do_not_rebuy: reason, forever = "same dev as rug -> skip forever", True
+        elif top is not None and top > r["max_dev_pct"]: reason = f"top holder {top}% > {r['max_dev_pct']}%"
+        elif bund is not None and bund > r["max_bundle_pct"]: reason = f"top-5 cluster {bund}% > {r['max_bundle_pct']}%"
+        elif key in self.traded: reason = "already traded this coin (no re-entry)"
+        elif curve < E["min_curve_pct"]: reason = f"curve only {curve}%"
+        elif strong_social:
+            if snap["sentiment_0_100"] < sc["min_sentiment"]: reason = f"weak sentiment {snap['sentiment_0_100']}/100"
+        elif snap and snap["mention_volume"] >= sc["min_mentions"]: reason = f"weak sentiment {snap['sentiment_0_100']}/100"
+        elif curve > E["max_curve_pct"]: reason = f"curve {curve}% graduated/late, no strong social"
+        elif mc > E["max_mcap_usd"]: reason = f"mcap ${mc:,.0f} > ${E['max_mcap_usd']:,} without strong social"
+        else:  # no LunarCrush topic: momentum fallback now needs real replies (0-reply momentum = 5 trades, -$123)
+            if c.get("reply_count", 0) < E["momentum_min_replies"]: reason = f"momentum w/o replies ({c.get('reply_count',0)} < {E['momentum_min_replies']})"
+        if reason:
+            self.stats["skips"] += 1; self.ledger.skip(key, reason, forever, c.get("creator"))
+            self.board.put(key, "done", verdict="SKIP", reason=reason); self.ev(f"SKIP {key} {reason}"); return
+        usd = min(self.cfg["position_usd"] * (1 if strong_social else E["momentum_size_mult"]), self.cash)
+        if usd < 20 or len(self.pos) >= 5:
+            self.board.put(key, "done", verdict="SKIP", reason="max positions / no cash"); self.stats["skips"] += 1; return
+        why = (f"social {snap['sentiment_0_100']}/100, {snap['mention_volume']} mentions" if snap and snap["mention_volume"] >= sc["min_mentions"]
+               else f"momentum curve {curve}%, {c.get('reply_count',0)} replies")
+        self.traded.add(key); self.cash -= usd; self.pos[key] = dict(mint=mint, usd=usd, entry=mc or 1, peak=mc or 1, t=time.time(), creator=c.get("creator"))
+        self.ledger.fill(key, "BUY", usd, mc, 0, why); self.stats["buys"] += 1
+        self.board.put(key, "holding", verdict="BUY", reason=why, pnl=0, pnl_pct=0); self.ev(f"BUY  {key} ${usd:.0f} @ mcap ${mc:,.0f} ({why})")
+    def close(self, key, mc, why):
+        p = self.pos.pop(key); val = p["usd"] * mc / p["entry"]; pnl = val - p["usd"]; self.cash += val
+        self.stats["realized"] += pnl; self.stats["wins" if pnl > 0 else "losses"] += 1
+        if pnl < -0.5 * p["usd"]: self.ledger.add_dnr(p["creator"])
+        self.ledger.fill(key, "SELL", val, mc, pnl, why)
+        self.board.put(key, "done", verdict="EXIT", reason=why, pnl=round(pnl, 2), pnl_pct=round(100 * pnl / p["usd"], 1), mcap=round(mc))
+        self.ev(f"EXIT {key} {why} pnl {pnl:+.2f}")
+    def manage(self):
+        for k, p in list(self.pos.items()):
+            try: mc = self.mcap(p["mint"])
+            except Exception: continue
+            p["last"] = mc; p["peak"] = max(p["peak"], mc); chg = 100 * (mc / p["entry"] - 1)
+            self.board.put(k, "holding", pnl=round(p["usd"] * chg / 100, 2), pnl_pct=round(chg, 1), mcap=round(mc))
+            age = time.time() - p["t"]; E = STRAT
+            if chg <= E["stop_loss_pct"]: self.close(k, mc, f"stop loss {chg:.0f}%")
+            elif chg >= self.cfg["take_profit_pct"]: self.close(k, mc, f"take profit {chg:+.0f}%")
+            elif p["peak"] >= p["entry"] * (1 + E["trail_arm_pct"] / 100) and mc < p["peak"] * (1 - E["trail_giveback_pct"] / 100):
+                self.close(k, mc, f"trailing stop {chg:+.0f}% (peak {100*(p['peak']/p['entry']-1):+.0f}%)")
+            elif age > E["flat_exit_s"] and chg < E["flat_exit_below_pct"]: self.close(k, mc, f"time exit {E['flat_exit_s']//60}m flat {chg:+.0f}%")
+            elif age > E["hard_exit_s"]: self.close(k, mc, f"time exit {E['hard_exit_s']//60}m {chg:+.0f}%")
+    def equity(self): return self.cash + sum(p["usd"] * p.get("last", p["entry"]) / p["entry"] for p in self.pos.values())
+    def write(self):
+        done = self.board.cards
+        if len(done) > 80:  # trim oldest done cards
+            old = sorted([k for k, v in done.items() if v["column"] == "done"], key=lambda k: done[k].get("ts_seen", 0))[:len(done) - 80]
+            for k in old: done.pop(k)
+        st = self.board.state(self.equity(), self.bank, "paper")
+        st.update(source="LIVE MARKET DATA · PAPER TRADES", stats={**self.stats, "realized": round(self.stats["realized"], 2)},
+                  log=self.log, lunarcrush=self.lc.mode, updated=time.strftime("%Y-%m-%d %H:%M:%S %Z"))
+        Path("out").mkdir(exist_ok=True); tmp = Path("out/board.json.tmp"); tmp.write_text(json.dumps(st, indent=1)); tmp.replace("out/board.json")
+    def tick(self):
+        self.stats["ticks"] += 1
+        coins = http(f"{PF}/coins?offset=0&limit=30&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
+        try: coins += http(f"{PF}/coins?offset=0&limit=30&sort=market_cap&order=DESC&includeNsfw=false")
+        except Exception: pass
+        new = [c for c in coins if c["mint"] not in self.seen and not c.get("complete")][:6]
+        for c in new: self.seen.add(c["mint"]); self.evaluate(c); self.manage()
+        self.manage(); self.write()
+
+def main():
+    load_env(); cfg = load(); cfg["mode"] = "paper"
+    f = Feed(cfg); stop = False; delay = 10
+    signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(SystemExit))
+    f.ev(f"feed start PAPER, lunarcrush={f.lc.mode}")
+    while True:
+        try: f.tick(); delay = 10
+        except SystemExit: break
+        except Exception as e:
+            delay = min(delay * 2, 300); f.ev(f"tick error {type(e).__name__}: {str(e)[:120]} -> backoff {delay}s")
+        time.sleep(delay)
+if __name__ == "__main__": main()

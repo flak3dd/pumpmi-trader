@@ -1,0 +1,101 @@
+ts,symbol,side,usd,price,pnl,reason,mode
+1793356141.0247548,IPO·3osK,BUY,320,32595.319293783552,0,"social 81.3/100, 29074 mentions",paper
+1793356255.9032393,LAZARUS·2Gvn,BUY,320,11908.06930309355,0,"social 77.0/100, 3427 mentions",paper
+1793356304.8494523,MARSCOIN·7sbm,BUY,320,10324.871836501266,0,"social 78.9/100, 521 mentions",paper
+1793356565.3638787,DAKOTA ·ArFn,BUY,320,19773.871998875475,0,"social 74.3/100, 7350 mentions",paper
+1793356580.9806538,DAKOTA ·ArFn,SELL,280.95,17360.853234260612,-39.05,trailing stop -12%,paper
+1793356598.6438677,CVE·2rt1,BUY,320,24767.045439238296,0,"momentum curve 35.9%, 0 replies",paper
+1793356607.527146,MARSCOIN·7sbm,BUY,320,19795.804206359222,0,"social 78.9/100, 521 mentions",paper
+1793356632.9458375,MARSCOIN·7sbm,SELL,217.73,13469.300775672324,-102.27,stop loss -32%,paper
+1793356673.171319,TYSON·2fwC,BUY,320,49289.54684822892,0,"social 65.6/100, 10477 mentions",paper
+1793356708.7251883,SC·EKeM,BUY,320,12596.972300953717,0,"social 70.9/100, 45416 mentions",paper
+1793356759.1761668,SURGEON·5VWd,BUY,320,18350.00747353517,0,"social 70.4/100, 5383 mentions",paper
+1793356839.6357498,HYPERMINE·H1un,BUY,78.68,27328.873053595773,0,"momentum curve 39.6%, 0 replies",paper
+1793356860.8012655,CVE·2rt1,SELL,223.69,17313.240703080493,-96.31,stop loss -30%,paper
+1793357573.2086775,TYSON·2fwC,SELL,319.81,49260.839749792496,-0.19,time exit 15m -0%,paper
+1793357611.2387877,SC·EKeM,SELL,367.15,14452.902500814991,47.15,time exit 15m +15%,paper
+1793357636.9245129,1X·766i,BUY,320,29789.99822671933,0,"momentum curve 43.2%, 0 replies",paper
+1793357670.360555,SURGEON·5VWd,SELL,346.89,19891.700293455156,26.89,time exit 15m +8%,paper
+1793357738.7385175,SMOOVE·BSe1,BUY,320,27442.34439101007,0,"momentum curve 39.8%, 0 replies",paper
+1793357751.365894,HYPERMINE·H1un,SELL,73.27,25448.052204587937,-5.42,time exit 15m -7%,paper
+1793358648.178593,1X·766i,SELL,320.0,29789.99822671933,0.0,time exit 15m +0%,paper
+1793358648.5526521,SMOOVE·BSe1,SELL,297.77,25535.54029805184,-22.23,time exit 15m -7%,paper
+1793358851.370137,LMC·4nxq,BUY,320,44032.7428219669,0,"momentum curve 63.8%, 0 replies",paper
+1793359483.0030644,DERP·3r3h,BUY,320,210886.06046068927,0,"momentum curve 100%, 0 replies",paper
+1793359751.5515122,LMC·4nxq,SELL,320.03,44037.20669521452,0.03,time exit 15m +0%,paper
+1793359988.5728817,XBT·AUED,BUY,320,215371.92534138536,0,"momentum curve 100%, 0 replies",paper
+1793360094.6289349,DERP·3r3h,SELL,320.68,211335.8202781448,0.68,time exit 10m flat +0%,paper
+1793360588.8999078,XBT·AUED,SELL,313.66,211101.8314918807,-6.34,time exit 10m flat -2%,paper
+1793409877.6433911,EI·HLKg,BUY,130,32792.187334186296,0,"v5 PASS: curve 26.8->47.5%, flow n/a -> fallback (0 replies, curve +20.7pts), social 65.2/100, top10 None%, dev None%",paper
+1793409888.2008336,EI·HLKg,SELL,91.08,45951.06089136077,26.08,scale-out half at +40%,paper
+1793409898.890679,EI·HLKg,SELL,61.3,30925.63758983048,-3.7,trail 12% -6% (peak +40%),paper
+1793409975.9456308,AAPLCAT·8gVB,BUY,130,20066.0449064238,0,"v5 PASS: curve 27.9->29.1%, flow n/a -> fallback (0 replies, curve +1.2pts), no social topic (neutral), top10 None%, dev None%",paper
+1793409978.3739605,WENDYQUEST·GWWt,BUY,130,20712.12363923909,0,"v5 PASS: curve 25.0->30.0%, flow n/a -> fallback (0 replies, curve +5.0pts), no social topic (neutral), top10 None%, dev None%",paper
+1793410172.0831268,WENDYQUEST·GWWt,SELL,90.12,28716.562856099572,25.12,scale-out half at +39%,paper
+1793410228.103175,WENDYQUEST·GWWt,SELL,72.92,23235.600168734516,7.92,trail 12% +12% (peak +39%),paper
+1793410243.2794778,NICKIMINAJ·HAc5,BUY,130,21881.48838516827,0,"v5 PASS: curve 27.4->31.7%, flow n/a -> fallback (0 replies, curve +4.3pts), social 51.4/100, top10 None%, dev None%",paper
+1793410344.1987448,NICKIMINAJ·HAc5,SELL,81.93,13790.399107428864,-48.07,stop loss -37%,paper
+1793410469.673496,FIGURE03·BJXz,BUY,130,21528.95909078344,0,"v5 PASS: curve 28.3->31.2%, flow n/a -> fallback (0 replies, curve +2.9pts), no social topic (neutral), top10 None%, dev None%",paper
+1793410514.8989418,FIGURE03·BJXz,SELL,81.62,27033.822802399824,16.62,scale-out half at +26%,paper
+1793410653.863493,FIGURE03·BJXz,SELL,83.04,27504.116437644676,18.04,trail 12% +28% (peak +50%),paper
+1793410699.9598167,AAPLCAT·8gVB,SELL,134.9,20821.98805151895,4.9,time exit 12m flat +4%,paper
+1793411747.6791406,NUTCAT·833w,BUY,130,21704.861439687957,0,"v5 PASS: curve 27.1->31.5%, flow n/a -> fallback (0 replies, curve +4.4pts), no social topic (neutral), top10 None%, dev None%",paper
+1793411748.0719175,NUTCAT·833w,SELL,109.59,18296.675896870867,-20.41,stop loss -16%,paper
+1793412125.867113,NUTINU·HoQr,BUY,130,27608.389129836043,0,"v5 PASS: curve 35.4->40.0%, flow n/a -> fallback (0 replies, curve +4.6pts), no social topic (neutral), top10 None%, dev None%",paper
+1793412190.278803,NUTINU·HoQr,SELL,105.87,22484.589834841696,-24.13,stop loss -19%,paper
+1793413588.0249093,MAKEMONEY·6pF5,BUY,130,20930.183454044098,0,"v5 PASS: curve 27.5->30.3%, flow n/a -> fallback (0 replies, curve +2.8pts), social 74.9/100, top10 None%, dev None%",paper
+1793413589.3903751,FIGURE03·Ghe8,BUY,130,24429.151435404376,0,"v5 PASS: curve 31.0->35.4%, flow n/a -> fallback (0 replies, curve +4.4pts), no social topic (neutral), top10 None%, dev None%",paper
+1793413700.3017502,MAKEMONEY·6pF5,SELL,81.48,26238.165694777475,16.48,scale-out half at +25%,paper
+1793413711.36684,FIGURE03·Ghe8,SELL,97.21,36535.77440611535,32.21,scale-out half at +50%,paper
+1793413722.634182,FIGURE03·Ghe8,SELL,82.72,31088.822988219577,17.72,trail 12% +27% (peak +50%),paper
+1793413830.3643298,MAKEMONEY·6pF5,SELL,83.69,26947.766767401434,18.69,trail 12% +29% (peak +54%),paper
+1793414128.6343136,SEED·3BSa,BUY,130,22764.423223405753,0,"v5 PASS: curve 31.6->33.0%, flow n/a -> fallback (0 replies, curve +1.4pts), social 83.2/100, top10 None%, dev None%",paper
+1793414666.0407908,LUMI·C7o7,BUY,130,23321.93073235871,0,"v5 PASS: curve 32.0->33.8%, flow n/a -> fallback (0 replies, curve +1.8pts), social 94.4/100, top10 None%, dev None%",paper
+1793414713.6990247,LUMI·C7o7,SELL,89.4,32075.350048667948,24.4,scale-out half at +38%,paper
+1793414737.0143704,LUMI·C7o7,SELL,74.23,26633.19305373628,9.23,trail 12% +14% (peak +38%),paper
+1793414851.765276,SEED·3BSa,SELL,113.57,19887.056293395286,-16.43,time exit 12m flat -13%,paper
+1793415641.1646972,HYPE·omsN,BUY,130,20060.763285850997,0,"v5 PASS: curve 27.2->29.1%, flow n/a -> fallback (0 replies, curve +1.9pts), social 76.6/100, top10 None%, dev None%",paper
+1793415805.8528512,PROS·2Uwt,BUY,130,23939.18757546192,0,"v5 PASS: curve 33.5->34.7%, flow n/a -> fallback (0 replies, curve +1.2pts), social 80.8/100, top10 None%, dev None%",paper
+1793415874.3943646,HYPE·omsN,SELL,106.54,16440.026416944092,-23.46,stop loss -18%,paper
+1793415874.530874,PROS·2Uwt,SELL,89.63,33009.16750462603,24.63,scale-out half at +38%,paper
+1793416015.9283793,PROS·2Uwt,SELL,77.21,28437.00006375043,12.21,trail 12% +19% (peak +40%),paper
+1793416810.8771272,HALLOWEENU·5bej,BUY,130,36375.18408128421,0,"v5 PASS: curve 29.5->52.7%, flow n/a -> fallback (0 replies, curve +23.2pts), no social topic (neutral), top10 None%, dev None%",paper
+1793416866.4034426,HALLOWEENU·5bej,SELL,102.57,28699.602203504954,-27.43,stop loss -21%,paper
+1793418039.7417684,CHILLGIVIN·5M35,BUY,130,21629.059148201475,0,"v7 PASS: curve 28.4->31.3%, flow n/a -> fallback (0 replies, curve +2.9pts), no social topic (neutral), top10 None%, dev None%",paper
+1793418042.817142,GHOSTY ·93HA,BUY,130,22981.08994540117,0,"v7 PASS: curve 28.3->33.3%, flow n/a -> fallback (0 replies, curve +5.0pts), social 67.2/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=0 (0W/0L)",paper
+1793418322.070944,CHILLGIVIN·5M35,SELL,81.54,27133.554555166396,16.54,scale-out half at +25%,paper
+1793418335.4921336,GHOSTY ·93HA,SELL,107.24,18957.733516979344,-22.76,stop loss -18%,paper
+1793418643.9854403,KYC·GTer,BUY,130,24606.965939619622,0,"v7 PASS: curve 34.2->35.7%, flow n/a -> fallback (0 replies, curve +1.5pts), social 69.0/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=1 (0W/1L)",paper
+1793418672.0272307,$FAST·7B2d,BUY,130,43045.26791006918,0,"v7 PASS: curve 47.3->62.4%, flow n/a -> fallback (0 replies, curve +15.1pts), social 78.4/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=1 (0W/1L)",paper
+1793418684.1457398,$FAST·7B2d,SELL,51.72,17124.922594574677,-78.28,stop loss -60%,paper
+1793418708.1269295,CHILLGIVIN·5M35,SELL,91.62,30487.440911981033,26.62,trail 12% +41% (peak +64%),paper
+1793418708.1707203,KYC·GTer,SELL,99.84,18897.535933951534,-30.16,stop loss -23%,paper
+1793420276.1001313,VAMPINU·Dmq4,BUY,130,21559.85140916819,0,"v7 PASS: curve 29.7->31.2%, flow n/a -> fallback (0 replies, curve +1.5pts), no social topic (neutral), top10 None%, dev None%",paper
+1793420591.0676844,HYPEROS·7bpT,BUY,130,21708.860910119376,0,"v7 PASS: curve 25.0->31.5%, flow n/a -> fallback (0 replies, curve +6.5pts), social 76.2/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=3 (0W/3L)",paper
+1793420660.2983134,VAMPINU·Dmq4,SELL,90.09,14941.5221776998,-39.91,stop loss -31%,paper
+1793420660.443866,HYPEROS·7bpT,SELL,110.2,18402.377466609705,-19.8,stop loss -15%,paper
+1793420946.6084104,OFFLINE·F7ZQ,BUY,65.0,26280.086260600387,0,"v7 PASS: curve 29.4->38.1%, flow n/a -> fallback (0 replies, curve +8.7pts), social 61.1/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=4 (0W/4L)",paper
+1793421092.369978,OFFLINE·F7ZQ,SELL,49.15,19873.238118230307,-15.85,stop loss -24%,paper
+1793421440.365085,$LILNIGLET·D4bW,BUY,65.0,28820.652513701258,0,"v7 PASS: curve 30.8->41.8%, flow n/a -> fallback (0 replies, curve +11.0pts), no social topic (neutral), top10 None%, dev None%",paper
+1793421440.7195308,$LILNIGLET·D4bW,SELL,54.97,24372.155955832797,-10.03,stop loss -15%,paper
+1793421852.8444295,PANKO·4df3,BUY,65.0,23338.779183947532,0,"v7 PASS: curve 28.4->33.8%, flow n/a -> fallback (0 replies, curve +5.4pts), social 84.8/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=5 (0W/5L)",paper
+1793421896.9942439,PANKO·4df3,SELL,51.69,18561.426221945272,-13.31,stop loss -20%,paper
+1793422846.0016448,DINO·C7ka,BUY,65.0,24778.064674516692,0,"v7 PASS: curve 28.7->35.9%, flow n/a -> fallback (0 replies, curve +7.2pts), social 70.5/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=6 (0W/6L)",paper
+1793422915.1648889,MOVEMBER·HcTm,BUY,65.0,28525.901879323927,0,"v7 PASS: curve 34.7->41.3%, flow n/a -> fallback (0 replies, curve +6.6pts), no social topic (neutral), top10 None%, dev None%",paper
+1793422985.7625554,DINO·C7ka,SELL,51.58,19662.317699272513,-13.42,stop loss -21%,paper
+1793423076.725248,MOVEMBER·HcTm,SELL,34.08,14955.224513333871,-30.92,stop loss -48%,paper
+1793424345.8970623,BOO·E4qu,BUY,65.0,28278.222665430087,0,"v7 PASS: curve 36.4->41.0%, flow n/a -> fallback (0 replies, curve +4.6pts), social 64.4/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=7 (0W/7L)",paper
+1793424379.070531,BOO·E4qu,SELL,55.05,23950.43293037073,-9.95,stop loss -15%,paper
+1793425016.5959685,SKY·DQLR,BUY,65.0,20358.088934100473,0,"v7 PASS: curve 27.3->29.5%, flow n/a -> fallback (0 replies, curve +2.2pts), social 75.1/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=8 (0W/8L)",paper
+1793425740.0885706,SKY·DQLR,SELL,65.0,20358.088934100473,0.0,time exit 12m flat +0%,paper
+1793426605.991139,ACT H·BWT5,BUY,65.0,23028.056527892662,0,"v7 PASS: curve 29.3->33.4%, flow n/a -> fallback (0 replies, curve +4.1pts), no social topic (neutral), top10 None%, dev None%",paper
+1793426688.2425842,ACT H·BWT5,SELL,53.72,19032.671004105418,-11.28,stop loss -17%,paper
+1793426715.3367863,EXCHANGE·DDgd,BUY,65.0,22419.91791054148,0,"v7 PASS: curve 29.9->32.5%, flow n/a -> fallback (0 replies, curve +2.6pts), social 66.7/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=9 (0W/9L)",paper
+1793427112.7924328,FAPPY·6NHp,BUY,65.0,23503.071036456273,0,"v7 PASS: curve 31.0->34.1%, flow n/a -> fallback (0 replies, curve +3.1pts), no social topic (neutral), top10 None%, dev None%",paper
+1793427250.9618876,FAPPY·6NHp,SELL,41.19,29787.217015518974,8.69,scale-out half at +27%,paper
+1793427285.4953096,FAPPY·6NHp,SELL,34.61,25030.76289736546,2.11,trail 12% +6% (peak +29%),paper
+1793427442.235804,EXCHANGE·DDgd,SELL,65.6,22626.729862663517,0.6,time exit 12m flat +1%,paper
+1793428060.8842285,NUT·63DG,BUY,130,21149.252216716537,0,"v7 PASS: curve 28.4->30.7%, flow n/a -> fallback (0 replies, curve +2.3pts), social 50.0/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=10 (1W/9L)",paper
+1793428151.6270077,NUT·63DG,SELL,110.14,17919.056038435265,-19.86,stop loss -15%,paper
+1793428465.3114405,TELEMETRY·GRYv,BUY,130,30198.728982263052,0,"v7 PASS: curve 36.8->43.8%, flow n/a -> fallback (0 replies, curve +7.0pts), social 80.0/100, top10 None%, dev None%, v7 SIM inconclusive score=None knn=0/0 n_hist=11 (1W/10L)",paper
+1793428476.4386568,TELEMETRY·GRYv,SELL,105.75,24566.222251341496,-24.25,stop loss -19%,paper

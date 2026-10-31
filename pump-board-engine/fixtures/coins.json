@@ -1,0 +1,181 @@
+[
+ {
+  "mint": "ZEPHmintPUMP111",
+  "symbol": "ZEPH",
+  "dev_wallet": "devA",
+  "dev_pct": 4,
+  "bundle_pct": 8,
+  "curve_pct": 40,
+  "price_path": [
+   1,
+   1.4,
+   2.04
+  ]
+ },
+ {
+  "mint": "RAGEYmintPUMP111",
+  "symbol": "RAGEY",
+  "dev_wallet": "devB",
+  "dev_pct": 31,
+  "bundle_pct": 10,
+  "curve_pct": 30,
+  "price_path": [
+   1,
+   0.1
+  ]
+ },
+ {
+  "mint": "LUMENmintPUMP111",
+  "symbol": "LUMEN",
+  "dev_wallet": "devC",
+  "dev_pct": 3,
+  "bundle_pct": 12,
+  "curve_pct": 58,
+  "price_path": [
+   1,
+   1.8,
+   2.64
+  ]
+ },
+ {
+  "mint": "FLUXmintPUMP111",
+  "symbol": "FLUX",
+  "dev_wallet": "devD",
+  "dev_pct": 5,
+  "bundle_pct": 20,
+  "curve_pct": 35,
+  "price_path": [
+   1,
+   0.95,
+   0.82
+  ],
+  "bundle_moved": true,
+  "bundle_move_step": 2
+ },
+ {
+  "mint": "GRITmintPUMP111",
+  "symbol": "GRIT",
+  "dev_wallet": "devE",
+  "dev_pct": 2,
+  "bundle_pct": 5,
+  "curve_pct": 50,
+  "price_path": [
+   1,
+   2,
+   3.08
+  ]
+ },
+ {
+  "mint": "HALOmintPUMP111",
+  "symbol": "HALO",
+  "dev_wallet": "devRUG1",
+  "dev_pct": 3,
+  "bundle_pct": 5,
+  "curve_pct": 20,
+  "price_path": [
+   1,
+   0.05
+  ]
+ },
+ {
+  "mint": "MEHmintPUMP111",
+  "symbol": "MEH",
+  "dev_wallet": "devJ",
+  "dev_pct": 3,
+  "bundle_pct": 6,
+  "curve_pct": 20,
+  "price_path": [
+   1,
+   1.1
+  ]
+ },
+ {
+  "mint": "FUDZmintPUMP111",
+  "symbol": "FUDZ",
+  "dev_wallet": "devK",
+  "dev_pct": 3,
+  "bundle_pct": 6,
+  "curve_pct": 30,
+  "price_path": [
+   1,
+   0.5
+  ]
+ },
+ {
+  "mint": "TRAPmintPUMP111",
+  "symbol": "TRAP",
+  "dev_wallet": "devL",
+  "dev_pct": 3,
+  "bundle_pct": 6,
+  "curve_pct": 30,
+  "price_path": [
+   1,
+   0.0
+  ],
+  "honeypot": true
+ },
+ {
+  "mint": "EXITDmintPUMP111",
+  "symbol": "EXITD",
+  "dev_wallet": "devM",
+  "dev_pct": 3,
+  "bundle_pct": 6,
+  "curve_pct": 30,
+  "price_path": [
+   1,
+   0.3
+  ],
+  "dev_sold": true
+ },
+ {
+  "mint": "KAPPAmintPUMP111",
+  "symbol": "KAPPA",
+  "dev_wallet": "devF",
+  "dev_pct": 6,
+  "bundle_pct": 10,
+  "curve_pct": 71,
+  "price_path": [
+   1,
+   2.5,
+   3.76
+  ]
+ },
+ {
+  "mint": "QUARKmintPUMP111",
+  "symbol": "QUARK",
+  "dev_wallet": "devG",
+  "dev_pct": 4,
+  "bundle_pct": 37,
+  "curve_pct": 25,
+  "price_path": [
+   1,
+   0.1
+  ]
+ },
+ {
+  "mint": "PIXAmintPUMP111",
+  "symbol": "PIXA",
+  "dev_wallet": "devH",
+  "dev_pct": 1,
+  "bundle_pct": 4,
+  "curve_pct": 45,
+  "price_path": [
+   1,
+   3,
+   4.36
+  ]
+ },
+ {
+  "mint": "SOLOmintPUMP111",
+  "symbol": "SOLO",
+  "dev_wallet": "devI",
+  "dev_pct": 5,
+  "bundle_pct": 9,
+  "curve_pct": 95,
+  "price_path": [
+   1,
+   3,
+   5.08
+  ]
+ }
+]
