@@ -162,3 +162,38 @@ def flat_round_trip_pct(spot_mcap: float, usd: float, sol_px: float | None, virt
     if entry <= 0:
         return None
     return 100.0 * (exited / entry - 1.0)
+
+
+def size_for_curve_depth(usd: float, spot_mcap: float, sol_px: float | None, virtual_sol: int | None,
+                         virtual_token: int | None, fee_bps: float, *, budget_pct: float,
+                         floor_usd: float) -> float:
+    """Largest size in ``[floor, usd]`` whose flat round trip is at least ``budget_pct``.
+
+    Impact gets worse as size grows, so the last dollars on a thin curve are the
+    expensive ones. A deep book, or a book that cannot be priced, keeps ``usd``.
+    When even ``floor_usd`` misses the budget, the floor is returned and the
+    caller's hard drag skip still decides whether that ticket is opened.
+    A budget of -100 or lower turns the cut off. The result never exceeds ``usd``.
+    """
+    proposed = float(usd)
+    floor = min(proposed, max(0.0, float(floor_usd)))
+    if proposed <= 0 or float(budget_pct) <= -100:
+        return proposed
+    hi = flat_round_trip_pct(spot_mcap, proposed, sol_px, virtual_sol, virtual_token, fee_bps)
+    if hi is None or hi + 1e-9 >= float(budget_pct):
+        return proposed
+    lo_drag = flat_round_trip_pct(spot_mcap, floor, sol_px, virtual_sol, virtual_token, fee_bps)
+    if lo_drag is None or lo_drag + 1e-9 < float(budget_pct):
+        return floor
+    lo, hi_size = floor, proposed
+    for _ in range(40):
+        mid = (lo + hi_size) / 2.0
+        drag = flat_round_trip_pct(spot_mcap, mid, sol_px, virtual_sol, virtual_token, fee_bps)
+        if drag is not None and drag + 1e-9 >= float(budget_pct):
+            lo = mid
+        else:
+            hi_size = mid
+    cents = int(lo * 100.0 + 1e-9) / 100.0
+    if cents + 1e-9 < floor:
+        return floor
+    return min(proposed, max(floor, cents))
