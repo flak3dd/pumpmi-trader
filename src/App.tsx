@@ -45,6 +45,7 @@ import TradeChart from "./components/TradeChart";
 import WatchControls from "./components/WatchControls";
 import OptimizerPanel from "./components/OptimizerPanel";
 import SignalAnalysisPanel from "./components/SignalAnalysisPanel";
+import PumpRadarPanel from "./components/PumpRadarPanel";
 import {
   useOptimizerStatus,
   type SignalAnalysisCandidate,
@@ -1594,6 +1595,7 @@ export default function App() {
                       onSelectCandidate={inspectCandidate}
                     />
                   )}
+                  {view === "terminal" && <PumpRadarPanel {...optimizer} />}
                   <WatchControls {...watchSettings} />
                 </>
               )}

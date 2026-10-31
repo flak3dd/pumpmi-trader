@@ -768,6 +768,9 @@ def build_signal_analysis(
     for position in positions.values():
         if not isinstance(position, dict):
             continue
+        if position.get("strategy") == "pump-capture-v1":
+            # Pump positions use their own exit set; the pump radar reports them.
+            continue
         mint = str(position.get("mint") or "")
         if not mint:
             continue

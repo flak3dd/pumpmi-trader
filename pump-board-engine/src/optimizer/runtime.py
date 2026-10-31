@@ -26,6 +26,18 @@ from .policy import (
     watch_checkpoint_state,
     watch_started_at,
 )
+from .pump import (
+    DEFAULT_VARIANT,
+    ENTRY_SIGNALS,
+    EXIT_SETS,
+    PUMP_MODES,
+    PUMP_SECONDS,
+    PUMP_STRATEGY,
+    PumpMarket,
+    empty_pump_state,
+    public_pump_state,
+    run_cycle as run_pump_cycle,
+)
 from .replay import validate_candidates
 from .signals import (
     build_signal_analysis,
@@ -153,8 +165,17 @@ class OptimizerRuntime:
         seed_document: dict[str, Any],
         enabled: bool = True,
         boot_id: str | None = None,
+        pump_mode: str = "off",
+        pump_variant: dict[str, str] | None = None,
+        pump_market: Any | None = None,
     ) -> None:
         self.store = store
+        self.pump_mode = pump_mode if pump_mode in PUMP_MODES else "off"
+        variant = dict(pump_variant or DEFAULT_VARIANT)
+        if variant.get("entry") not in ENTRY_SIGNALS or variant.get("exit") not in EXIT_SETS:
+            variant = dict(DEFAULT_VARIANT)
+        self.pump_variant = variant
+        self.pump_market = pump_market
         self.source = source or PumpFunSource()
         self.seed_document = deepcopy(seed_document)
         self.enabled = enabled
@@ -174,6 +195,7 @@ class OptimizerRuntime:
             "validation": _empty_validation(),
             "events": [],
             "signal_analysis": empty_signal_analysis(),
+            "pump_state": empty_pump_state(self.pump_mode, self.pump_variant),
             "done_cards": [],
             "last_review_boundary": None,
             "last_validated_champion": champion,
@@ -189,7 +211,10 @@ class OptimizerRuntime:
         document = load_strategy_config()
         store = DatabaseStore.from_env()
         actual_enabled = os.environ.get("PUMPMI_OPTIMIZER_ENABLED", "").strip() == "1" if enabled is None else enabled
-        return cls(store, source=source, seed_document=document, enabled=actual_enabled)
+        pump_mode = os.environ.get("PUMPMI_PUMP_MODE", "off").strip().lower()
+        entry, _, exit_set = os.environ.get("PUMPMI_PUMP_VARIANT", "").strip().upper().partition("-")
+        variant = {"entry": entry, "exit": exit_set} if entry and exit_set else None
+        return cls(store, source=source, seed_document=document, enabled=actual_enabled, pump_mode=pump_mode, pump_variant=variant)
 
     def config(self) -> dict[str, Any]:
         document = self.store.get_config()
@@ -487,6 +512,7 @@ class OptimizerRuntime:
             "reviews": reviews,
             "entryReadiness": self._entry_readiness(tracked, portfolio, stats, now=now),
             "signalAnalysis": public_signal_analysis(signal_state, now=now),
+            "pumpMode": public_pump_state(self.store.get_state("pump_state", empty_pump_state()), now=now),
         }
 
     def _record_closed(self, trade: dict[str, Any], done: list[dict[str, Any]]) -> None:
@@ -640,6 +666,9 @@ class OptimizerRuntime:
                 observed_by_mint = {str(item["mint"]): item for item in accepted_observations}
                 # Existing open positions consume only their own actual mcap observations.
                 for position_id, position in list(portfolio["positions"].items()):
+                    if position.get("strategy") == PUMP_STRATEGY:
+                        # The pump loop owns its own exits on verified reserves.
+                        continue
                     observation = observed_by_mint.get(str(position["mint"]))
                     if not observation:
                         continue
@@ -811,6 +840,98 @@ class OptimizerRuntime:
         self.maybe_review(now=review_now, use_wall_clock=not explicit_now)
         return True
 
+    def pump_tick(self, *, now: float | None = None) -> bool:
+        """One fast pump-capture cycle: collect outside the transaction, decide inside the lease fence.
+
+        Paper only. Exits for open pump positions run in radar and paper modes; entries only in paper mode.
+        """
+        if not self.enabled or not self.lease_owned or self.pump_mode == "off":
+            return False
+        explicit_now = now is not None
+        if self.pump_market is None:
+            self.pump_market = PumpMarket()
+        market = self.pump_market
+        snapshot = self.store.get_state("portfolio", initial_portfolio())
+        prior_state = self.store.get_state("pump_state", empty_pump_state(self.pump_mode, self.pump_variant))
+        held: dict[str, dict[str, Any]] = {}
+        for position in (snapshot.get("positions") or {}).values():
+            if isinstance(position, dict) and position.get("strategy") == PUMP_STRATEGY:
+                held[str(position["mint"])] = dict((position.get("pump") or {}).get("meta") or {}, symbol=position.get("symbol"))
+        for order in (prior_state.get("pending") or []) if isinstance(prior_state, dict) else []:
+            if isinstance(order, dict) and order.get("meta"):
+                held.setdefault(str(order["mint"]), dict(order["meta"]))
+        for mint, info in held.items():
+            market.ensure_meta(mint, info)
+        if market.sol_usd is None and isinstance(prior_state, dict):
+            # After a restart the listing may be down; a recent durable SOL/USD keeps held tokens readable.
+            saved = prior_state.get("solUsd") or {}
+            seed_now = float(now) if explicit_now else time.time()
+            if _number(saved.get("value")) and _number(saved.get("at")) is not None and seed_now - float(saved["at"]) <= 600:
+                market.sol_usd = float(saved["value"])
+        batch = market.collect(set(held), now=now if explicit_now else None)
+        renew_now = float(now) if explicit_now else time.time()
+        if not self._renew_lease(now=renew_now):
+            return False
+        fence_now = float(now) if explicit_now else None
+        try:
+            with self.store.lease_fence("optimizer-worker", self.boot_id, now=fence_now):
+                mutation_now = float(now) if explicit_now else time.time()
+                portfolio = self.store.get_state("portfolio", initial_portfolio(), fresh=True)
+                self._assert_portfolio_capacity(portfolio)
+                state = self.store.get_state("pump_state", None, fresh=True)
+                if not isinstance(state, dict) or state.get("version") != 1:
+                    state = empty_pump_state(self.pump_mode, self.pump_variant)
+                state["variant"] = dict(self.pump_variant)
+                config = self.config()
+                had_positions = any(isinstance(p, dict) and p.get("strategy") == PUMP_STRATEGY for p in portfolio["positions"].values())
+                results = run_pump_cycle(market, batch, state, portfolio, now=mutation_now, mode=self.pump_mode,
+                                         strategy_revision=int(config["revision"]))
+                self._assert_portfolio_capacity(portfolio)
+                values: dict[str, Any] = {"pump_state": state}
+                has_positions = any(isinstance(p, dict) and p.get("strategy") == PUMP_STRATEGY for p in portfolio["positions"].values())
+                if results or had_positions or has_positions:
+                    values["portfolio"] = portfolio
+                if results:
+                    done = self.store.get_state("done_cards", [], fresh=True)
+                    events = self.store.get_state("events", [], fresh=True)
+                    stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
+                    signal_state = self.store.get_state("signal_analysis", empty_signal_analysis(), fresh=True)
+                    done = done if isinstance(done, list) else []
+                    events = events if isinstance(events, list) else []
+                    stats = stats if isinstance(stats, dict) else _empty_board_stats()
+                    for key, value in _empty_board_stats().items():
+                        stats.setdefault(key, value)
+                    structured = signal_events(signal_state)
+                    for event in results:
+                        if event["status"] == "closed":
+                            self._record_closed(event, done)
+                            stats["realized"] = round(float(stats["realized"]) + float(event["net"]), 8)
+                            if float(event["net"]) > 0:
+                                stats["wins"] = int(stats["wins"]) + 1
+                            elif float(event["net"]) < 0:
+                                stats["losses"] = int(stats["losses"]) + 1
+                            events.append(f"{_now_iso(mutation_now)} PUMP EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
+                            structured = record_signal_event(structured, at=float(event["exit_at"]), mint=event["mint"], symbol=event["symbol"],
+                                                             side="sell", action="SELL", readiness_pct=100.0, reason=event["reason"])
+                        elif event["status"] == "scaled":
+                            events.append(f"{_now_iso(mutation_now)} PUMP SCALE {event['symbol']} {event['reason']}")
+                            structured = record_signal_event(structured, at=float(event["at"]), mint=event["mint"], symbol=event["symbol"],
+                                                             side="sell", action="SCALE", readiness_pct=100.0, reason=f"pump: {event['reason']}")
+                        elif event["status"] == "bought":
+                            position = event["position"]
+                            stats["buys"] = int(stats["buys"]) + 1
+                            events.append(f"{_now_iso(mutation_now)} PUMP BUY {position['symbol']} ${position['pump']['ticket']:.2f} at mcap ${position['entry_mcap']:,.0f}")
+                            structured = record_signal_event(structured, at=float(position["entry_at"]), mint=position["mint"], symbol=position["symbol"],
+                                                             side="buy", action="BUY", readiness_pct=100.0,
+                                                             reason=f"pump-capture-v1 {position['pump']['signal']} signal; next-read paper fill")
+                    signal_state = {**(signal_state if isinstance(signal_state, dict) else empty_signal_analysis()), "events": structured[-120:]}
+                    values.update({"done_cards": done[-MAX_DONE_CARDS:], "events": events[-60:], "board_stats": stats, "signal_analysis": signal_state})
+                self.store.set_many_state(values, now=mutation_now)
+        except LeaseLost:
+            self.lease_owned = False
+            return False
+        return True
+
     def maybe_review(self, *, now: float, use_wall_clock: bool = False) -> None:
         """Compute candidates outside locks then fence the short durable decision."""
         if not self.lease_owned:
@@ -914,7 +1035,8 @@ class OptimizerRuntime:
             holdings.append({
                 "symbol": _display_symbol(position["symbol"], position["mint"]), "mint": position["mint"], "name": position.get("name", ""), "column": "holding", "verdict": "BUY", "mcap": round(mcap),
                 "pnl": round(float(position["remaining_basis"]) * change / 100.0, 2), "pnl_pct": round(change, 2),
-                "reason": "forward paper position; modeled execution costs shown in optimizer status", "ts_seen": position["entry_at"],
+                "reason": ("pump-capture-v1 paper position: next-read fills, 1.25% fee + curve impact" if position.get("strategy") == PUMP_STRATEGY
+                           else "forward paper position; modeled execution costs shown in optimizer status"), "ts_seen": position["entry_at"],
                 "watch_started_ts": position.get("watch_started_ts"), "watch_periods": deepcopy(position.get("watch_periods") or {}), "social": "unavailable",
             })
         checking = [self._watch_card(track, as_of=as_of) for track in tracked.values() if not track.get("entry_decided")]
@@ -1022,6 +1144,12 @@ class Worker(threading.Thread):
         self.lease_ttl_seconds = lease_ttl_seconds
         self.stop_event = threading.Event()
         self.backoff_seconds = poll_seconds
+        self.pump_worker = PumpWorker(runtime, self.stop_event) if runtime.pump_mode != "off" else None
+
+    def start(self) -> None:
+        super().start()
+        if self.pump_worker is not None:
+            self.pump_worker.start()
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -1065,9 +1193,42 @@ class Worker(threading.Thread):
                     pass
                 self.backoff_seconds = min(max(self.poll_seconds, self.backoff_seconds * 2), 300.0)
             self.stop_event.wait(self.backoff_seconds)
+        if self.pump_worker is not None and self.pump_worker.is_alive():
+            self.pump_worker.join(timeout=15)
         if self.runtime.lease_owned:
             try:
                 self.runtime.store.release_lease("optimizer-worker", self.runtime.boot_id)
             except Exception:
                 pass
             self.runtime.lease_owned = False
+
+
+class PumpWorker(threading.Thread):
+    """Fast pump-capture loop sharing the main worker's lease (renew only, never acquire).
+
+    The store serializes transactions on one connection under a process lock, and every
+    fenced cycle re-reads portfolio state, so this thread and the main worker cannot
+    overwrite each other or exceed the six-position cap.
+    """
+
+    def __init__(self, runtime: OptimizerRuntime, stop_event: threading.Event, *, cadence: float = PUMP_SECONDS) -> None:
+        super().__init__(name="pumpmi-pump-capture", daemon=True)
+        self.runtime = runtime
+        self.stop_event = stop_event
+        self.cadence = cadence
+        self.backoff = cadence
+        self.last_error: str | None = None
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            started = time.time()
+            try:
+                if self.runtime.lease_owned:
+                    self.runtime.pump_tick()
+                self.last_error = None
+                self.backoff = self.cadence
+            except Exception as exc:  # keep the main worker and HTTP alive
+                self.last_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+                self.backoff = min(max(self.cadence, self.backoff * 2), 60.0)
+            elapsed = time.time() - started
+            self.stop_event.wait(max(0.5, self.backoff - elapsed) if self.last_error is None else self.backoff)

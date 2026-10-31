@@ -18,7 +18,9 @@
     "test:signals": "python3 scripts/test_signal_analysis.py",
     "test:signal-panel": "tsx scripts/test_signal_panel.tsx",
     "format": "prettier --write src vite.config.ts scripts/test_ui.tsx",
-    "start": "python3 scripts/serve.py"
+    "start": "python3 scripts/serve.py",
+    "test:pump-panel": "tsx scripts/test_pump_panel.tsx",
+    "test:pump": "python3 scripts/test_pump_mode.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

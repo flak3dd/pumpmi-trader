@@ -40,6 +40,73 @@ export type SignalAnalysisEvent = {
   reason: string;
 };
 
+export type PumpGate = {
+  key: string;
+  label: string;
+  status: "pass" | "fail" | "unknown";
+  detail: string;
+};
+
+export type PumpRadarRow = {
+  mint: string;
+  symbol: string;
+  mcap: number | null;
+  curvePct: number | null;
+  momentum30sPct: number | null;
+  signals: Record<string, boolean>;
+  gates: PumpGate[];
+  readinessPct: number;
+  held: boolean;
+  pending: boolean;
+  readAgeS: number | null;
+  netPct: number | null;
+};
+
+export type PumpEvent = {
+  at: number;
+  action: string;
+  mint: string;
+  symbol: string;
+  reason: string;
+};
+
+export type PumpMode = {
+  strategy: string;
+  mode: "off" | "radar" | "paper";
+  variant: { entry: string; exit: string };
+  asOf: number | null;
+  fresh: boolean;
+  disclaimer: string;
+  holderGate: string;
+  calibrated: boolean;
+  cadenceSeconds: number;
+  ticketUsd: number;
+  costModel: { feePct: number; networkUsd: number; impact: string; fill: string };
+  book: {
+    closed?: number;
+    wins?: number;
+    losses?: number;
+    net?: number;
+    drawdownPct?: number;
+    maxDrawdownPct?: number;
+    streak?: number;
+    paused?: string | null;
+    missed?: number;
+    buys?: number;
+  };
+  source: {
+    route?: string;
+    error?: string | null;
+    hot?: number;
+    lastRead?: number | null;
+    verifiedPoints?: number;
+    launchReads?: number;
+  };
+  pending: { kind: string; mint: string; symbol: string; decided_at: number; reason: string }[];
+  radar: PumpRadarRow[];
+  events: PumpEvent[];
+};
+
 export type SignalAnalysis = {
   asOf: number | null;
   model: "gate-readiness-v1";
@@ -68,6 +135,7 @@ export type OptimizerStatus = {
     blocker: string | null;
   };
   signalAnalysis?: SignalAnalysis;
+  pumpMode?: PumpMode;
   source: {
     name: string;
     lastObservation: number | null;
