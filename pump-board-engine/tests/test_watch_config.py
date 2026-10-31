@@ -109,9 +109,9 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
         feed.holders = lambda _coin: (0, 0, 0, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 0
         feed.social = lambda _symbol: None
-        # Reserve progress stays inside the 30–70 band. SOL rises at each checkpoint
-        # so the acceleration gate can pass and this test still observes the buy.
-        sols = {1000.0: 5_000_000_000, 1090.0: 5_300_000_000, 1180.0: 5_700_000_000, 1300.0: 6_200_000_000}
+        # Reserve progress stays inside the 30–70 band. SOL per second rises
+        # (0.002, 0.004, 0.006) so the rate gate still buys.
+        sols = {1000.0: 5_000_000_000, 1090.0: 5_180_000_000, 1180.0: 5_540_000_000, 1300.0: 6_260_000_000}
 
         def curve_state(_coin):
             return {
@@ -150,7 +150,7 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
             "elapsed_s": 90.0,
             "status": "observed",
             "curve_delta": 0.0,
-            "real_sol": 5_300_000_000,
+            "real_sol": 5_180_000_000,
         }
         assert watch["watch_periods"]["medium"]["status"] == "watching"
         assert not feed.pos and not feed.ledger.fills

@@ -4,7 +4,7 @@ v8 expected-edge revision (not a profitability claim):
   H1 swap tape from curve SOL deltas — buyers, net SOL, top-buyer share; missing tape skips.
   H2 position checks every ~2.5s before coin scans; parallel marks; 10% one-check emergency exit.
   H3 paper fills include the fee and, when reserves are known, bonding-curve impact.
-  M1 short/medium/long reserve flow must accelerate; material post-entry SOL outflow exits.
+  M1 each watch window's SOL per second must rise; a longer window is not acceleration. Material post-entry SOL outflow exits.
   M2 curve band 30–70%, or 70–85% only with stronger buyer breadth. Above 85% skips.
   M3 volatility can tighten the stop but not past -15%; +15% net arms fee-inclusive break-even.
   M4 similarity boost needs >=30 prior exits, is capped at 1.5x, and ignores future rows.
@@ -140,6 +140,21 @@ class Feed:
             slices.append((sol - previous) / 1e9)
             previous = sol
         return slices
+
+    @staticmethod
+    def _flow_window_seconds(watch: dict) -> list[float] | None:
+        """Seconds covered by each checkpoint delta. None if a window is not usable."""
+        periods = watch.get("watch_periods") or {}
+        try:
+            short = float(periods["short"]["duration_s"])
+            medium = float(periods["medium"]["duration_s"])
+            long = float(periods["long"]["duration_s"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        windows = [short, medium - short, long - medium]
+        if any(item <= 0 for item in windows):
+            return None
+        return windows
 
     def restore(self):
         """Rebuild cash/realized/open positions from the live ledger so restarts keep stats continuous."""
@@ -429,7 +444,11 @@ class Feed:
             return
         strong = curve > rules["curve_breadth_from_pct"]
         slices = self._flow_slices(watch)
-        accel_ok, accel_why = accelerating(slices, rules["flow_slice_dust_sol"])
+        durations = self._flow_window_seconds(watch)
+        # Always pass lengths. An unusable window fails closed instead of comparing absolute SOL.
+        accel_ok, accel_why = accelerating(
+            slices, rules["flow_slice_dust_sol"], durations if durations is not None else (),
+        )
         if not accel_ok:
             return self.skip(key, accel_why, False, coin)
         flow = self.flow_for(coin, watch["t"])
@@ -452,7 +471,7 @@ class Feed:
         self.watch.pop(mint, None)
         if len(self.pos) >= rules["max_open"]:
             return self.skip(key, f"max {rules['max_open']} open", False, coin)
-        strength = signal_strength(flow, slices, rules, strong=strong)
+        strength = signal_strength(flow, slices, rules, strong=strong, durations=durations)
         usd = size_for_signal(strength, rules)
         if self.loss_streak >= rules["loss_streak_halve"]:
             usd /= 2

@@ -68,6 +68,22 @@ def test_acceleration_and_reversal():
     assert not accelerating([0.4, 0.3, 0.8], 0.01)[0]
     assert not accelerating([0.2, 0.4], 0.01)[0]
     assert not accelerating(None, 0.01)[0]
+
+
+def test_rate_acceleration_rejects_a_fade_absolute_sol_accepts():
+    """Saved watches are 30s / 150s / 885s. Absolute SOL rises while the rate collapses."""
+    slices = [0.60, 0.75, 0.885]
+    durations = [30, 150, 885]
+    assert accelerating(slices, 0.01)[0]
+    rejected, why = accelerating(slices, 0.01, durations)
+    assert not rejected and "SOL/s" in why
+    # 0.01, 0.02, 0.03 SOL/s across those same windows.
+    rising = [0.30, 3.0, 26.55]
+    assert accelerating(rising, 0.01, durations)[0]
+    flat = [0.30, 1.50, 8.85]
+    assert accelerating(flat, 0.01)[0]
+    assert not accelerating(flat, 0.01, durations)[0]
+    assert not accelerating(rising, 0.01, [30, 0, 885])[0]
     entry = 10_000_000_000
     assert not flow_reversed(entry, entry - 10_000_000, 1.0, dust_sol=0.05, giveback=0.25)
     assert flow_reversed(entry, entry - 400_000_000, 1.0, dust_sol=0.05, giveback=0.25)
@@ -174,3 +190,19 @@ def test_cleaner_distribution_sizes_larger_without_leaving_the_band():
     unmeasured.pop("top3_buyer_pct")
     unmeasured.pop("meaningful_buyers")
     assert signal_strength(unmeasured, slices, STRAT) < high
+
+
+def test_longer_window_does_not_take_the_acceleration_size_credit():
+    summary = dict(
+        unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
+        meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
+    )
+    # Flat 0.01 SOL/s. Absolute SOL makes the last window look like a surge.
+    flat = [0.30, 1.50, 8.85]
+    durations = [30, 150, 885]
+    rated = signal_strength(summary, flat, STRAT, durations=durations)
+    absolute = signal_strength(summary, flat, STRAT)
+    assert rated < absolute
+    rising = [0.30, 3.0, 26.55]
+    assert signal_strength(summary, rising, STRAT, durations=durations) > rated
+    assert STRAT["size_min"] <= size_for_signal(rated, STRAT) <= size_for_signal(absolute, STRAT) <= STRAT["size_max"]

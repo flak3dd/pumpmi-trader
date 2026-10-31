@@ -394,8 +394,13 @@ class OptimizerRuntime:
 
         for observation in batch.observations:
             mint = str(observation["mint"])
+            # A missing reserve read must not anchor the watch at 0% or sample a fake delta.
+            # Open positions were already marked from market cap above.
+            curve_known = observation.get("curve_known") is not False
             track = tracked.get(mint)
             if track is None:
+                if not curve_known:
+                    continue
                 if len(tracked) >= MAX_TRACKED:
                     self._trim_tracks(tracked, portfolio)
                 if len(tracked) >= MAX_TRACKED:
@@ -408,8 +413,12 @@ class OptimizerRuntime:
                 tracked[mint] = track
             track.update({
                 "symbol": observation["symbol"], "name": observation.get("name", ""), "last_seen": float(observation["observed_at"]),
-                "last_mcap": observation["market_cap"], "last_curve": observation["curve_pct"], "risk": observation.get("risk"),
+                "last_mcap": observation["market_cap"], "risk": observation.get("risk"),
             })
+            if curve_known:
+                track["last_curve"] = observation["curve_pct"]
+            else:
+                continue
             try:
                 record_watch_observation(track, observation)
                 checkpoints = watch_checkpoint_state(track, as_of=float(observation["observed_at"]))
