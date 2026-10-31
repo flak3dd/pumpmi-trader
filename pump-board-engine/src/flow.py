@@ -11,7 +11,9 @@ three wallets still own the buy SOL. Meaningful buyers reject a unique count
 inflated by dust wallets. A top-3 cap of 100 or more disables that test. A
 meaningful-buyer minimum of 0 disables that test. Neither gate changes fees.
 Acceleration compares SOL per second once window lengths are known, so a
-longer checkpoint cannot pass as rising flow.
+longer checkpoint cannot pass as rising flow. The last watch window is gated
+on its own: a whole-tape cap can pass while the window that triggers the
+entry is a single wallet.
 """
 from __future__ import annotations
 
@@ -103,6 +105,54 @@ def summarize(trades: list, meaningful_sol: float = FLOW_MEANINGFUL_SOL) -> dict
     }
 
 
+def with_last_window(summary: dict, trades: list, since_ts: float | None) -> dict:
+    """Attach the buy distribution at or after ``since_ts``.
+
+    A missing cutoff or any undated trade leaves the fields empty. Callers
+    treat that as unavailable and skip, rather than using the whole tape.
+    """
+    if since_ts is None or any(trade.get("ts") is None for trade in trades):
+        summary["last_window_buyers"] = None
+        summary["last_window_top_pct"] = None
+        summary["last_window_buy_sol"] = None
+        return summary
+    cutoff = float(since_ts)
+    late = [trade for trade in trades if float(trade["ts"]) >= cutoff]
+    late_summary = summarize(late, meaningful_sol=float(summary.get("meaningful_sol", FLOW_MEANINGFUL_SOL)))
+    summary["last_window_buyers"] = late_summary["unique_buyers"]
+    summary["last_window_top_pct"] = late_summary["top_buyer_pct"]
+    summary["last_window_buy_sol"] = late_summary["buy_sol"]
+    return summary
+
+
+def last_window_allows(summary: dict | None, strat: dict) -> tuple[bool, str]:
+    """The window that triggers the entry must itself be more than one wallet.
+
+    Whole-tape unique, top-buyer, and top-3 caps can all pass while the latest
+    window is a single buyer. That buyer is the paper entry's counterparty.
+    A buyer minimum of 0 and a top-buyer cap of 100 or more together disable
+    the test. Either control left on still fails closed when the fields are missing.
+    """
+    need = int(strat["flow_last_window_min_buyers"])
+    cap = float(strat["flow_last_window_max_whale_pct"])
+    if need <= 0 and cap >= 100:
+        return True, "flow last window disabled"
+    if not summary:
+        return False, "flow last window unavailable"
+    buyers = summary.get("last_window_buyers")
+    top = summary.get("last_window_top_pct")
+    buy_sol = summary.get("last_window_buy_sol")
+    if buyers is None or top is None or buy_sol is None:
+        return False, "flow last window unavailable"
+    if float(buy_sol) <= 0:
+        return False, "flow last window has no buys"
+    if int(buyers) < need:
+        return False, f"flow last window buyers {int(buyers)} < {need}"
+    if cap < 100 and float(top) > cap:
+        return False, f"flow last window top buyer {float(top):.0f}% > {cap:g}%"
+    return True, f"flow last window buyers {int(buyers)}, top {float(top):.0f}%"
+
+
 def flow_allows(summary: dict | None, strat: dict, strong: bool = False) -> tuple[bool, str]:
     """Enforce P2. A missing summary never passes."""
     if not summary:
@@ -182,11 +232,12 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
                     durations: list | None = None) -> float:
     """0 at the floor, 1 when breadth, imbalance, concentration, and acceleration are all clearly stronger.
 
-    Top-3 slack and meaningful-buyer slack participate equally with the older four
-    terms. Missing distribution fields contribute 0, so an unmeasured tape cannot
-    size up. When window lengths are passed, the acceleration term is the SOL/s
-    ratio, so a longer last window does not by itself take the high-size credit.
-    The result is still clamped to 0..1 for ``size_for_signal``.
+    Top-3 slack, meaningful-buyer slack, and last-window slack participate with
+    the older four terms. Missing distribution fields contribute 0, so an
+    unmeasured tape cannot size up. When window lengths are passed, the
+    acceleration term is the SOL/s ratio, so a longer last window does not by
+    itself take the high-size credit. The result is still clamped to 0..1 for
+    ``size_for_signal``.
     """
     need = strat["flow_strong_buyers"] if strong else strat["flow_min_buyers"]
     buyers = max(0.0, (summary["unique_buyers"] - need) / max(need, 1))
@@ -220,9 +271,21 @@ def signal_strength(summary: dict, slices: list, strat: dict, strong: bool = Fal
         meaningful_score = 1.0
     else:
         meaningful_score = max(0.0, (float(meaningful) - need_meaningful) / max(need_meaningful, 1.0))
+    late_buyers = summary.get("last_window_buyers")
+    late_top = summary.get("last_window_top_pct")
+    need_late = int(strat.get("flow_last_window_min_buyers", 3))
+    late_cap = float(strat.get("flow_last_window_max_whale_pct", 50))
+    if late_buyers is None or late_top is None:
+        late_score = 0.0
+    elif need_late <= 0 and late_cap >= 100:
+        late_score = 1.0
+    else:
+        buyer_score = 1.0 if need_late <= 0 else max(0.0, (float(late_buyers) - need_late) / max(need_late, 1))
+        whale_score = 1.0 if late_cap >= 100 else max(0.0, (late_cap - float(late_top)) / max(late_cap, 1e-9))
+        late_score = (buyer_score + whale_score) / 2.0
     parts = (
         min(buyers, 1), min(imbalance, 1), min(whale, 1), min(accel, 1),
-        min(top3_score, 1), min(meaningful_score, 1),
+        min(top3_score, 1), min(meaningful_score, 1), min(late_score, 1),
     )
     return max(0.0, min(1.0, sum(parts) / len(parts)))
 

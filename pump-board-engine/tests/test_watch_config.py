@@ -123,10 +123,11 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
             }
 
         feed.curve_state = curve_state
-        feed.flow_for = lambda _coin, _since: {
+        feed.flow_for = lambda _coin, _since, _last=None: {
             "signed_quote_sol": 1.2, "buy_sol": 2.0, "sell_sol": 0.8, "imbalance": 2.5,
             "unique_buyers": 16, "top_buyer_pct": 10.0, "top3_buyer_pct": 22.0,
             "meaningful_buyers": 12, "trades": 20,
+            "last_window_buyers": 6, "last_window_top_pct": 18.0, "last_window_buy_sol": 0.9,
         }
 
         feed.evaluate(coin)
