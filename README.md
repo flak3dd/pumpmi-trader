@@ -6,7 +6,7 @@ Pumpmi's high-voltage dashboard connects to the **running live-market paper engi
 
 `GET /api/live-feed` bootstraps the current live engine state. `GET /api/live-feed/events` is a server-sent-event stream emitting named `feed` events and connection heartbeats. The dashboard consumes these events automatically, with reconnect and display-pause controls. Pausing the display does not stop the paper worker.
 
-There is **no historical-file fallback** in normal browsing. If the worker/database is unavailable, the endpoint returns `503`; the interface shows connecting/disconnected/stale states instead of displaying an archived dataset. Opening a stream does not itself prove fresh prices: frames must carry verified source timestamps. The old `/api/snapshot` route is a compatibility alias for live-only data, not a saved-file response.
+There is **no historical-file fallback** in normal browsing. If neither the durable optimizer nor a running file-backed paper worker with a fresh board is available, `/api/live-feed` and `/api/live-feed/events` return `503`. The interface shows connecting/disconnected/stale states instead of displaying an archived dataset. Opening a stream does not itself prove fresh prices: frames must carry verified source timestamps. The old `/api/snapshot` route is a compatibility alias for live-only data, not a saved-file response.
 
 Watched tokens have market-cap paths derived from real observations. A path without paper execution is marked as a market watch, has no fabricated BUY/SELL signals, and is excluded from closed-trade counts, realized P&L, and the journal. Completed paper trades use actual modeled entry/exit amounts and observed prices. These sampled paths are not exchange candle histories or measured real-money fills.
 
@@ -36,6 +36,32 @@ PUMPMI_OPTIMIZER_ENABLED=1 pnpm dev:api
 
 Vite proxies the relative `/api` endpoints to the adapter. For production, the Dockerfile builds the frontend and serves a live-data dashboard replica on port 3000 with `PUMPMI_WORKER_ENABLED=0`. The selected Cloud Computer runs the continuous worker under systemd with the worker flag enabled. `GET /health` is a cheap liveness check; `/api/optimizer` exposes actual worker ownership, source freshness/errors, and portfolio status.
 
+### File-backed paper worker without MySQL
+
+When `DATABASE_URL` is unset, the adapter serves the file-backed paper worker instead of the optimizer. That path is still paper-only: public pump.fun ticks and modeled fills, with no wallet, signature, or live order. `POST /api/simulate` and the checked-in fixtures stay test utilities and are not used as a live feed.
+
+The adapter imports the engine, which needs PyYAML (`config.py`). Use the engine virtualenv for the API and the worker when system Python does not already have the engine requirements:
+
+```bash
+python3 -m venv pump-board-engine/.venv
+pump-board-engine/.venv/bin/pip install -r pump-board-engine/requirements.txt
+```
+
+Start the worker with the engine as the working directory so Python can import `src`. On startup it switches to `pump-board-engine` and publishes `out/board.json`, `out/trade_charts.json`, and `out/live_feed.pid`:
+
+```bash
+cd pump-board-engine
+.venv/bin/python -m src.live_feed
+```
+
+In another terminal, run the API with that same interpreter and no database URL:
+
+```bash
+DATABASE_URL= pump-board-engine/.venv/bin/python scripts/serve.py
+```
+
+`/api/live-feed` and the SSE stream `/api/live-feed/events` return the board only while that pid is a live `src.live_feed` process and `out/board.json` was published within 180 seconds. A current `board.ts` is `meta.kind` `live`; a missing timestamp is `awaiting`; a timestamp more than a few seconds ahead is `stale`. A stopped worker, a file older than 180 seconds, or a `board.ts` older than 180 seconds returns `503`. `meta.simulationAvailable` stays false. `pnpm dev` on port 3000 proxies `/api` to this adapter. Restart the worker after upgrading so it writes the pid file.
+
 ## Three watch periods and six positions
 
 Every token displays Short, Medium, and Long watch checkpoints. Three sliders save the actual duration parameters, with increasing 15-second increments, 350-millisecond debouncing, revision checks, and visible saving/failure/retry states. The engine captures settings when a new watch starts, so changing a slider does not rewrite an in-progress watch. Maximum open paper positions stays fixed at **six**.
@@ -46,7 +72,7 @@ Every token displays Short, Medium, and Long watch checkpoints. Three sliders sa
 {"watchPeriods":{"short":90,"medium":180,"long":300},"revision":0}
 ```
 
-Use the current returned revision, not this illustrative zero. The user's currently saved settings are preserved. MySQL persists configuration, observations, positions, reviews, and worker coordination; restart does not reset the bankroll or champion. Local configuration editing without a database remains available, but it does not make a live feed available.
+Use the current returned revision, not this illustrative zero. The user's currently saved settings are preserved. MySQL persists configuration, observations, positions, reviews, and worker coordination; restart does not reset the bankroll or champion. Local configuration editing without a database remains available. Editing that file does not itself publish a live feed; start `python -m src.live_feed` from `pump-board-engine` for the file-backed path.
 
 ## Holder-risk RPC
 
@@ -86,7 +112,7 @@ Reduced-motion preferences, keyboard navigation, inspection, live paper journal 
 
 Each authorized change pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. The ten-minute strategy task remains paused; it is not restarted by a dashboard change.
 
-The managed dashboard is connected to the durable forward-paper optimizer. The separately available legacy `src.live_feed.Feed` implementation and its newly pulled v8 helper modules are preserved in this repository, but are a distinct runner. Active strategy telemetry reports the durable worker's actual limits rather than incorrectly advertising unused legacy thresholds. A future strategy integration must be validated against the active runner, not assumed from changes to another entry point.
+The managed dashboard uses the durable forward-paper optimizer when `DATABASE_URL` is configured. Without that database, `/api/live-feed` and `/api/live-feed/events` serve the file-backed `src.live_feed` paper worker only while its pid is alive and its board is fresh. Active strategy telemetry still reports the durable worker's actual limits when that runtime is enabled. A future strategy integration must be validated against the runner that is actually serving the feed.
 
 ## Health check from Manus Preview
 

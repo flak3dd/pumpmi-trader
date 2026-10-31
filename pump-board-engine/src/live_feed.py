@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .config import load
+from .file_feed import publish_pid, refresh_pid, release_pid
 from .strategy_config import effective_strategy
 from .aggregators.lunarcrush import LunarCrushClient, LunarCrushError
 from .aggregators.fuse import fuse, PLATFORMS
@@ -894,10 +895,32 @@ class Feed:
             stats={**self.stats, "realized": round(self.stats["realized"], 2)},
             log=self.log, lunarcrush=self.lc.mode, updated=time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         )
-        Path("out").mkdir(exist_ok=True)
-        temporary = Path("out/board.json.tmp")
+        out = Path("out")
+        out.mkdir(exist_ok=True)
+        temporary = out / "board.json.tmp"
         temporary.write_text(json.dumps(state, indent=1))
-        temporary.replace("out/board.json")
+        temporary.replace(out / "board.json")
+        self._write_trade_charts(out)
+        refresh_pid(out)
+
+    def _write_trade_charts(self, out: Path) -> None:
+        """Publish closed-trade charts beside the board. A missing ledger is an empty object.
+
+        A parse failure leaves the previous chart file in place so a bad row cannot wipe it.
+        """
+        try:
+            from .trade_charts import build
+
+            built = build()
+        except FileNotFoundError:
+            built = {}
+        except Exception:
+            return
+        if not isinstance(built, dict):
+            return
+        temporary = out / "trade_charts.json.tmp"
+        temporary.write_text(json.dumps(built, separators=(",", ":")))
+        temporary.replace(out / "trade_charts.json")
 
     def scan(self):
         self.stats["ticks"] += 1
@@ -941,25 +964,34 @@ class Feed:
 
 
 def main():
+    # Board, charts, ledger, and the pid file all use this working directory.
+    os.chdir(Path(__file__).resolve().parents[1])
     load_env()
     cfg = load()
     cfg["mode"] = "paper"
-    feed = Feed(cfg)
-    stop_delay = feed.strategy["pos_check_s"]
-    signal.signal(signal.SIGTERM, lambda *args: (_ for _ in ()).throw(SystemExit))
-    feed.ev(
-        f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, lunarcrush={feed.lc.mode}"
-    )
-    while True:
-        try:
-            feed.cycle()
-            stop_delay = feed.strategy["pos_check_s"]
-        except SystemExit:
-            break
-        except Exception as exc:
-            stop_delay = min(max(stop_delay * 2, feed.strategy["pos_check_s"]), 30)
-            feed.ev(f"tick error {type(exc).__name__}: {str(exc)[:120]} -> backoff {stop_delay}s")
-        time.sleep(stop_delay)
+    try:
+        publish_pid(Path("out"))
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        feed = Feed(cfg)
+        stop_delay = feed.strategy["pos_check_s"]
+        signal.signal(signal.SIGTERM, lambda *args: (_ for _ in ()).throw(SystemExit))
+        feed.ev(
+            f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, lunarcrush={feed.lc.mode}"
+        )
+        while True:
+            try:
+                feed.cycle()
+                stop_delay = feed.strategy["pos_check_s"]
+            except SystemExit:
+                break
+            except Exception as exc:
+                stop_delay = min(max(stop_delay * 2, feed.strategy["pos_check_s"]), 30)
+                feed.ev(f"tick error {type(exc).__name__}: {str(exc)[:120]} -> backoff {stop_delay}s")
+            time.sleep(stop_delay)
+    finally:
+        release_pid(Path("out"))
 
 
 if __name__ == "__main__":
