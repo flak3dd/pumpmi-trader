@@ -100,6 +100,7 @@ export default function useStrategyConfig() {
     if (saving.current || !savedRef.current.editable || !active.current) return;
     if (matches(draftRef.current, savedRef.current.watchPeriods)) {
       setStatus("saved");
+      setError("");
       return;
     }
     const sent = { ...draftRef.current };

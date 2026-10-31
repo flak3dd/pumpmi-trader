@@ -28,7 +28,7 @@ from .policy import (
 )
 from .replay import validate_candidates
 from .source import PumpFunSource
-from .store import DatabaseStore, RevisionConflict, StoreUnavailable
+from .store import DatabaseStore, LeaseLost, RevisionConflict, StoreUnavailable
 
 
 INTERVAL_SECONDS = 1800
@@ -135,20 +135,23 @@ class OptimizerRuntime:
         self.lease_owned = False
         self.local_error: str | None = None
         self.store.migrate(self.seed_document)
-        if self.store.get_state("portfolio") is None:
-            self.store.set_many_state({
-                "portfolio": initial_portfolio(),
-                "tracked": {},
-                "source": _empty_source(),
-                "board_stats": _empty_board_stats(),
-                "validation": _empty_validation(),
-                "events": [],
-                "done_cards": [],
-                "last_review_boundary": None,
-                "last_validated_champion": deepcopy(self.store.get_config() or self.seed_document),
-                "active_promotion": None,
-                "health": {"runtime": "warming_up", "lastTick": None, "lastReview": None, "nextReview": None, "error": None},
-            })
+        # Every row is insert-if-missing in one transaction. Competing deployment
+        # starts cannot turn a momentary missing read into a reset of portfolio,
+        # user state, or promotion markers owned by the other process.
+        champion = deepcopy(self.store.get_config() or self.seed_document)
+        self.store.initialize_state_if_missing({
+            "portfolio": initial_portfolio(),
+            "tracked": {},
+            "source": _empty_source(),
+            "board_stats": _empty_board_stats(),
+            "validation": _empty_validation(),
+            "events": [],
+            "done_cards": [],
+            "last_review_boundary": None,
+            "last_validated_champion": champion,
+            "active_promotion": None,
+            "health": {"runtime": "warming_up", "lastTick": None, "lastReview": None, "nextReview": None, "error": None},
+        })
 
     @classmethod
     def from_env(cls, *, source: Any | None = None, enabled: bool | None = None) -> "OptimizerRuntime":
@@ -180,8 +183,11 @@ class OptimizerRuntime:
         if revision != current["revision"]:
             raise RevisionConflict("strategy revision conflict")
         document = {"version": 1, "revision": int(current["revision"]) + 1, "watchPeriods": periods, "max_open": MAX_OPEN}
-        self.store.update_config(document, int(revision), source="user")
-        self.store.audit("user_strategy_update", {"previous": current, "next": document})
+        self.store.update_user_config_with_audit(
+            document,
+            int(revision),
+            {"action": "user_strategy_update", "previous": current, "next": document},
+        )
         return document
 
     def _health(self) -> dict[str, Any]:
@@ -198,11 +204,20 @@ class OptimizerRuntime:
         }, now=now)
 
     def _renew_lease(self, *, now: float) -> bool:
-        """Fence durable writes after potentially slow collection or a worker error."""
-        self.lease_owned = self.store.acquire_lease(
+        """Retain continuous authority for this batch; do not reacquire after loss."""
+        self.lease_owned = self.store.renew_lease(
             "optimizer-worker", self.boot_id, ttl_seconds=LEASE_TTL_SECONDS, now=now,
         )
         return self.lease_owned
+
+    @staticmethod
+    def _assert_portfolio_capacity(portfolio: dict[str, Any]) -> None:
+        """Refuse corrupt over-cap state; never reset it or silently liquidate it."""
+        positions = portfolio.get("positions")
+        if not isinstance(positions, dict):
+            raise RuntimeError("portfolio positions state is invalid")
+        if len(positions) > MAX_OPEN:
+            raise RuntimeError("portfolio exceeds fixed maximum of 6 open positions; refusing mutation")
 
     def _events(self) -> list[str]:
         value = self.store.get_state("events", [])
@@ -231,8 +246,21 @@ class OptimizerRuntime:
             "reason": track.get("reason", "watching actual market-cap path"),
         }
 
-    def _trim_tracks(self, tracked: dict[str, dict[str, Any]], portfolio: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        if len(tracked) <= MAX_TRACKED:
+    def _trim_tracks(
+        self,
+        tracked: dict[str, dict[str, Any]],
+        portfolio: dict[str, Any],
+        *,
+        reserve_slots: int = 0,
+    ) -> dict[str, dict[str, Any]]:
+        """Retain bounded watches while protecting held and undecided paths.
+
+        Normal end-of-cycle trimming leaves up to ``MAX_TRACKED`` entries. During
+        admission a caller can reserve one slot, safely retiring the oldest
+        entry-decided non-position watch at an exactly full 64-track set.
+        """
+        target = max(0, MAX_TRACKED - max(0, int(reserve_slots)))
+        if len(tracked) <= target:
             return tracked
         protected = {position["mint"] for position in portfolio.get("positions", {}).values()}
         removable = sorted(
@@ -240,7 +268,7 @@ class OptimizerRuntime:
             key=lambda track: float(track.get("last_seen", 0)),
         )
         for track in removable:
-            if len(tracked) <= MAX_TRACKED:
+            if len(tracked) <= target:
                 break
             tracked.pop(str(track["mint"]), None)
         return tracked
@@ -316,8 +344,13 @@ class OptimizerRuntime:
         })
 
     def _run_rollback_if_needed(self, *, now: float, portfolio: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """Roll back only a promoted strategy after durable forward DD exceeds 10%."""
-        active = self.store.get_state("active_promotion")
+        """Roll back only the still-active promoted strategy after DD exceeds 10%.
+
+        This method is called inside ``lease_fence``. The config CAS, audit,
+        rollback marker clear, validation result, and champion state therefore
+        either all commit with the portfolio cycle or all roll back together.
+        """
+        active = self.store.get_state("active_promotion", fresh=True)
         observed_drawdown = max(
             float(portfolio.get("max_drawdown_pct", 0.0)),
             float(portfolio.get("drawdown_pct", 0.0)),
@@ -326,16 +359,31 @@ class OptimizerRuntime:
             return portfolio, None
         current = self.config()
         previous = active.get("previous")
-        if not isinstance(previous, dict) or int(previous.get("revision", -1)) >= int(current["revision"]):
+        promoted = active.get("promoted")
+        if (
+            not isinstance(previous, dict)
+            or not isinstance(promoted, dict)
+            or int(previous.get("revision", -1)) >= int(current["revision"])
+            or int(promoted.get("revision", -1)) != int(current["revision"])
+        ):
             return portfolio, None
         rollback = {"version": 1, "revision": int(current["revision"]) + 1, "watchPeriods": previous["watchPeriods"], "max_open": MAX_OPEN}
-        try:
-            self.store.promote_config_with_audit(rollback, int(current["revision"]), {"action": "rollback", "previous": current, "restored": rollback, "reason": "forward paper drawdown exceeded 10%"}, now=now)
-        except RevisionConflict:
-            return portfolio, None
         drawdown = observed_drawdown
         validation = {**_empty_validation(), "state": "rolled_back", "reason": "forward paper drawdown exceeded 10%; restored last validated champion", "maxDrawdown": round(drawdown, 8)}
-        self.store.set_many_state({"validation": validation, "active_promotion": None}, now=now)
+        try:
+            self.store.update_config_with_audit_and_state(
+                rollback,
+                int(current["revision"]),
+                {"action": "rollback", "previous": current, "restored": rollback, "reason": "forward paper drawdown exceeded 10%"},
+                state_values={
+                    "validation": validation,
+                    "active_promotion": None,
+                    "last_validated_champion": rollback,
+                },
+                now=now,
+            )
+        except RevisionConflict:
+            return portfolio, None
         return portfolio, validation
 
     def tick(self, *, now: float | None = None) -> bool:
@@ -348,122 +396,153 @@ class OptimizerRuntime:
             return False
         explicit_now = now is not None
         now = time.time() if now is None else now
-        tracked = self.store.get_state("tracked", {})
-        portfolio = self.store.get_state("portfolio", initial_portfolio())
-        source_status = self.store.get_state("source", _empty_source())
-        config = self.config()  # User saves are read every cycle; existing watches stay immutable.
-        batch = self.source.collect(list(tracked)[:MAX_TRACKED], now=now)
-        fence_now = now if explicit_now else time.time()
-        if not self._renew_lease(now=fence_now):
+        # Collection is intentionally outside a database transaction. This first
+        # snapshot only tells the source which mints to ask for; all trading state
+        # is reloaded authoritatively after the post-collection lease fence.
+        collect_tracked = self.store.get_state("tracked", {})
+        batch = self.source.collect(list(collect_tracked)[:MAX_TRACKED], now=now)
+        renew_now = now if explicit_now else time.time()
+        if not self._renew_lease(now=renew_now):
             # A newer worker owns the lease. This stale collector must write nothing.
             return False
-        if batch.error:
-            source_status.update({"name": batch.source_name, "error": batch.error, "social": batch.social, "trackedTokens": len(tracked)})
-            self.store.set_many_state({"source": source_status, "portfolio": portfolio, "events": self._event(f"source failure: {batch.error}", now=now)}, now=now)
-            self._set_health(runtime="degraded", now=now, error=batch.error)
-            return True
+        fence_now = now if explicit_now else None
+        try:
+            with self.store.lease_fence("optimizer-worker", self.boot_id, now=fence_now):
+                # Fresh bypasses the telemetry cache. Existing watches retain their
+                # persisted durations; only a just-created watch uses this freshly
+                # re-read post-collection document.
+                tracked = self.store.get_state("tracked", {}, fresh=True)
+                portfolio = self.store.get_state("portfolio", initial_portfolio(), fresh=True)
+                source_status = self.store.get_state("source", _empty_source(), fresh=True)
+                self._assert_portfolio_capacity(portfolio)
+                config = self.config()
+                if batch.error:
+                    source_status.update({"name": batch.source_name, "error": batch.error, "social": batch.social, "trackedTokens": len(tracked)})
+                    self.store.set_many_state({
+                        "source": source_status,
+                        "portfolio": portfolio,
+                        "events": self._event(f"source failure: {batch.error}", now=now),
+                    }, now=now)
+                    self._set_health(runtime="degraded", now=now, error=batch.error)
+                    return True
+
+                self.store.record_observations(batch.observations)
+                done = self.store.get_state("done_cards", [], fresh=True)
+                events = self.store.get_state("events", [], fresh=True)
+                stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
+                if not isinstance(done, list):
+                    done = []
+                if not isinstance(events, list):
+                    events = []
+                if not isinstance(stats, dict):
+                    stats = _empty_board_stats()
+                for key, value in _empty_board_stats().items():
+                    stats.setdefault(key, value)
+                stats["ticks"] = int(stats["ticks"]) + 1
+                stats["scanned"] = int(stats["scanned"]) + len(batch.observations)
+                observed_by_mint = {str(item["mint"]): item for item in batch.observations}
+                # Existing open positions consume only their own actual mcap observations.
+                for position_id, position in list(portfolio["positions"].items()):
+                    observation = observed_by_mint.get(str(position["mint"]))
+                    if not observation:
+                        continue
+                    event = apply_observation(portfolio, position_id, observation)
+                    if event and event["status"] == "closed":
+                        self._record_closed(event, done)
+                        stats["realized"] = round(float(stats["realized"]) + float(event["net"]), 8)
+                        if float(event["net"]) > 0:
+                            stats["wins"] = int(stats["wins"]) + 1
+                        elif float(event["net"]) < 0:
+                            stats["losses"] = int(stats["losses"]) + 1
+                        events.append(f"{_now_iso(now)} EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
+                    elif event and event["status"] == "scaled":
+                        events.append(f"{_now_iso(now)} SCALE {position['symbol']} {event['reason']}")
+
+                for observation in batch.observations:
+                    mint = str(observation["mint"])
+                    track = tracked.get(mint)
+                    if track is None:
+                        if len(tracked) >= MAX_TRACKED:
+                            self._trim_tracks(tracked, portfolio, reserve_slots=1)
+                        if len(tracked) >= MAX_TRACKED:
+                            continue
+                        track = {
+                            "mint": mint, "symbol": observation["symbol"], "name": observation.get("name", ""),
+                            **make_watch_state(config["watchPeriods"], started_at=float(observation["observed_at"]), start_curve=float(observation["curve_pct"])),
+                            "entry_decided": False, "reason": "watching actual market-cap path", "last_seen": float(observation["observed_at"]),
+                        }
+                        tracked[mint] = track
+                    track.update({
+                        "symbol": observation["symbol"], "name": observation.get("name", ""), "last_seen": float(observation["observed_at"]),
+                        "last_mcap": observation["market_cap"], "last_curve": observation["curve_pct"], "risk": observation.get("risk"),
+                    })
+                    try:
+                        record_watch_observation(track, observation)
+                        checkpoints = watch_checkpoint_state(track, as_of=float(observation["observed_at"]))
+                    except (TypeError, ValueError, KeyError):
+                        track["entry_decided"] = True
+                        track["reason"] = "SKIP checkpoint state unavailable"
+                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        stats["skips"] = int(stats["skips"]) + 1
+                        continue
+                    if track.get("entry_decided"):
+                        continue
+                    if checkpoints["long"]["status"] != "observed":
+                        continue
+                    track["entry_decided"] = True
+                    reason = entry_reason(observation, track)
+                    if reason is None and len(portfolio["positions"]) >= MAX_OPEN:
+                        reason = "max 6 open positions"
+                    if reason is not None:
+                        track["reason"] = f"SKIP {reason}"
+                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        stats["skips"] = int(stats["skips"]) + 1
+                        events.append(f"{_now_iso(now)} SKIP {track['symbol']} {reason}")
+                        continue
+                    position = open_position(portfolio, observation, strategy_revision=int(config["revision"]), watch=track)
+                    if position is None:
+                        track["reason"] = "SKIP insufficient paper cash"
+                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        stats["skips"] = int(stats["skips"]) + 1
+                        events.append(f"{_now_iso(now)} SKIP {track['symbol']} insufficient paper cash")
+                    else:
+                        track["reason"] = "entered after three actual immutable watch checkpoints; social unavailable and unused"
+                        stats["buys"] = int(stats["buys"]) + 1
+                        events.append(f"{_now_iso(now)} BUY {track['symbol']} ${position['initial_notional']:.2f} actual mcap ${position['entry_mcap']:,.0f}")
+
+                self._trim_tracks(tracked, portfolio)
+                done = done[-MAX_DONE_CARDS:]
+                source_status.update({
+                    "name": batch.source_name, "lastObservation": now if batch.observations else source_status.get("lastObservation"), "error": None,
+                    "observations": int(source_status.get("observations", 0)) + len(batch.observations), "trackedTokens": len(tracked), "social": batch.social,
+                })
+                self.store.set_many_state({
+                    "tracked": tracked, "portfolio": portfolio, "source": source_status,
+                    "done_cards": done, "events": events[-60:], "board_stats": stats,
+                }, now=now)
+                self._run_rollback_if_needed(now=now, portfolio=portfolio)
+                self._set_health(runtime="running", now=now)
+        except LeaseLost:
+            self.lease_owned = False
+            return False
 
         self.local_error = None
-        self.store.record_observations(batch.observations)
-        done = self.store.get_state("done_cards", [])
-        events = self._events()
-        stats = self.store.get_state("board_stats", _empty_board_stats())
-        if not isinstance(stats, dict):
-            stats = _empty_board_stats()
-        for key, value in _empty_board_stats().items():
-            stats.setdefault(key, value)
-        stats["ticks"] = int(stats["ticks"]) + 1
-        stats["scanned"] = int(stats["scanned"]) + len(batch.observations)
-        observed_by_mint = {str(item["mint"]): item for item in batch.observations}
-        # Existing open positions consume only their own actual mcap observations.
-        for position_id, position in list(portfolio["positions"].items()):
-            observation = observed_by_mint.get(str(position["mint"]))
-            if not observation:
-                continue
-            event = apply_observation(portfolio, position_id, observation)
-            if event and event["status"] == "closed":
-                self._record_closed(event, done)
-                stats["realized"] = round(float(stats["realized"]) + float(event["net"]), 8)
-                if float(event["net"]) > 0:
-                    stats["wins"] = int(stats["wins"]) + 1
-                elif float(event["net"]) < 0:
-                    stats["losses"] = int(stats["losses"]) + 1
-                events.append(f"{_now_iso(now)} EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
-            elif event and event["status"] == "scaled":
-                events.append(f"{_now_iso(now)} SCALE {position['symbol']} {event['reason']}")
-
-        for observation in batch.observations:
-            mint = str(observation["mint"])
-            track = tracked.get(mint)
-            if track is None:
-                if len(tracked) >= MAX_TRACKED:
-                    self._trim_tracks(tracked, portfolio)
-                if len(tracked) >= MAX_TRACKED:
-                    continue
-                track = {
-                    "mint": mint, "symbol": observation["symbol"], "name": observation.get("name", ""),
-                    **make_watch_state(config["watchPeriods"], started_at=float(observation["observed_at"]), start_curve=float(observation["curve_pct"])),
-                    "entry_decided": False, "reason": "watching actual market-cap path", "last_seen": float(observation["observed_at"]),
-                }
-                tracked[mint] = track
-            track.update({
-                "symbol": observation["symbol"], "name": observation.get("name", ""), "last_seen": float(observation["observed_at"]),
-                "last_mcap": observation["market_cap"], "last_curve": observation["curve_pct"], "risk": observation.get("risk"),
-            })
-            try:
-                record_watch_observation(track, observation)
-                checkpoints = watch_checkpoint_state(track, as_of=float(observation["observed_at"]))
-            except (TypeError, ValueError, KeyError):
-                track["entry_decided"] = True
-                track["reason"] = "SKIP checkpoint state unavailable"
-                done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
-                stats["skips"] = int(stats["skips"]) + 1
-                continue
-            if track.get("entry_decided"):
-                continue
-            if checkpoints["long"]["status"] != "observed":
-                continue
-            track["entry_decided"] = True
-            reason = entry_reason(observation, track)
-            if reason is None and len(portfolio["positions"]) >= MAX_OPEN:
-                reason = "max 6 open positions"
-            if reason is not None:
-                track["reason"] = f"SKIP {reason}"
-                done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
-                stats["skips"] = int(stats["skips"]) + 1
-                events.append(f"{_now_iso(now)} SKIP {track['symbol']} {reason}")
-                continue
-            position = open_position(portfolio, observation, strategy_revision=int(config["revision"]), watch=track)
-            if position is None:
-                track["reason"] = "SKIP insufficient paper cash"
-                done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
-                stats["skips"] = int(stats["skips"]) + 1
-                events.append(f"{_now_iso(now)} SKIP {track['symbol']} insufficient paper cash")
-            else:
-                track["reason"] = "entered after three actual immutable watch checkpoints; social unavailable and unused"
-                stats["buys"] = int(stats["buys"]) + 1
-                events.append(f"{_now_iso(now)} BUY {track['symbol']} ${position['initial_notional']:.2f} actual mcap ${position['entry_mcap']:,.0f}")
-
-        self._trim_tracks(tracked, portfolio)
-        done = done[-MAX_DONE_CARDS:]
-        source_status.update({
-            "name": batch.source_name, "lastObservation": now if batch.observations else source_status.get("lastObservation"), "error": None,
-            "observations": int(source_status.get("observations", 0)) + len(batch.observations), "trackedTokens": len(tracked), "social": batch.social,
-        })
-        events = events[-60:]
-        self.store.set_many_state({"tracked": tracked, "portfolio": portfolio, "source": source_status, "done_cards": done, "events": events, "board_stats": stats}, now=now)
-        portfolio, _ = self._run_rollback_if_needed(now=now, portfolio=portfolio)
-        self._set_health(runtime="running", now=now)
-        self.maybe_review(now=now)
+        self.maybe_review(now=now, use_wall_clock=not explicit_now)
         return True
 
-    def maybe_review(self, *, now: float) -> None:
+    def maybe_review(self, *, now: float, use_wall_clock: bool = False) -> None:
+        """Compute candidates outside locks then fence the short durable decision."""
+        if not self.lease_owned:
+            return
         boundary = int(now // INTERVAL_SECONDS) * INTERVAL_SECONDS
-        previous = self.store.get_state("last_review_boundary")
+        previous = self.store.get_state("last_review_boundary", fresh=True)
         if previous is not None and float(previous) >= boundary:
             return
-        source = self.store.get_state("source", _empty_source())
-        tracked = self.store.get_state("tracked", {})
+        # Capture exactly one document before validation. The promotion CAS later
+        # uses this same revision, so a slider save can only reject promotion.
+        document = self.config()
+        source = self.store.get_state("source", _empty_source(), fresh=True)
+        tracked = self.store.get_state("tracked", {}, fresh=True)
         fresh = source.get("lastObservation") is not None and now - float(source["lastObservation"]) <= max(120.0, 4 * POLL_SECONDS)
         if not fresh:
             validation = {**_empty_validation(), "reason": "source is not fresh; review held"}
@@ -472,24 +551,44 @@ class OptimizerRuntime:
         else:
             # Bound memory/read cost without deleting optimizer-owned historical data.
             observations = self.store.observations(limit=OBSERVATION_READ_LIMIT)
-            validation = validate_candidates(observations, self.config()["watchPeriods"])
-        document = self.config()
+            validation = validate_candidates(observations, document["watchPeriods"])
         decision = validation["state"]
-        if validation["state"] == "promoted":
-            promoted = {"version": 1, "revision": int(document["revision"]) + 1, "watchPeriods": validation["candidate"], "max_open": MAX_OPEN}
-            try:
-                self.store.promote_config_with_audit(promoted, int(document["revision"]), {"action": "promotion", "previous": document, "next": promoted, "validation": validation}, now=now)
-                self.store.set_many_state({"last_validated_champion": document, "active_promotion": {"previous": document, "promoted": promoted, "at": now}}, now=now)
-                validation = dict(validation)
-                validation["reason"] = "heldout criteria met; promoted atomically"
-                decision = "promoted"
-            except RevisionConflict:
-                validation = {**validation, "state": "waiting", "reason": "user configuration changed during review; no promotion"}
-                decision = "waiting"
-        review = {"id": f"review-{boundary}", "at": now, "boundary": boundary, "decision": decision, "reason": validation["reason"], "metrics": validation}
-        self.store.record_review(review)
-        self.store.set_many_state({"validation": validation, "last_review_boundary": boundary, "events": self._event(f"review {decision}: {validation['reason']}", now=now)}, now=now)
-        self._set_health(runtime="running", now=now, last_review=now)
+        try:
+            # Production validation can be comparatively expensive; use a fresh
+            # wall-clock expiry check at commit rather than the tick-start time.
+            with self.store.lease_fence("optimizer-worker", self.boot_id, now=None if use_wall_clock else now):
+                durable_boundary = self.store.get_state("last_review_boundary", fresh=True)
+                if durable_boundary is not None and float(durable_boundary) >= boundary:
+                    return
+                if validation["state"] == "promoted":
+                    promoted = {"version": 1, "revision": int(document["revision"]) + 1, "watchPeriods": validation["candidate"], "max_open": MAX_OPEN}
+                    try:
+                        promoted_validation = {**validation, "reason": "heldout criteria met; promoted atomically"}
+                        self.store.update_config_with_audit_and_state(
+                            promoted,
+                            int(document["revision"]),
+                            {"action": "promotion", "previous": document, "next": promoted, "validation": validation},
+                            state_values={
+                                "last_validated_champion": document,
+                                "active_promotion": {"previous": document, "promoted": promoted, "at": now},
+                            },
+                            now=now,
+                        )
+                        validation = promoted_validation
+                        decision = "promoted"
+                    except RevisionConflict:
+                        validation = {**validation, "state": "waiting", "reason": "user configuration changed during review; no promotion"}
+                        decision = "waiting"
+                review = {"id": f"review-{boundary}", "at": now, "boundary": boundary, "decision": decision, "reason": validation["reason"], "metrics": validation}
+                self.store.record_review(review)
+                self.store.set_many_state({
+                    "validation": validation,
+                    "last_review_boundary": boundary,
+                    "events": self._event(f"review {decision}: {validation['reason']}", now=now),
+                }, now=now)
+                self._set_health(runtime="running", now=now, last_review=now)
+        except LeaseLost:
+            self.lease_owned = False
 
     @staticmethod
     def _buy_gates(trade: dict[str, Any]) -> list[dict[str, Any]]:
@@ -520,6 +619,7 @@ class OptimizerRuntime:
 
     def snapshot_payload(self, *, now: float | None = None) -> dict[str, Any]:
         """Build a frontend-compatible board from durable forward data only."""
+        use_wall_clock = now is None
         now = time.time() if now is None else now
         source = self.store.get_state("source", _empty_source())
         tracked = self.store.get_state("tracked", {})
@@ -619,6 +719,10 @@ class OptimizerRuntime:
                 ],
                 "gatesSell": [],
             }
+        if use_wall_clock:
+            # A read can wait for a worker transaction and then return a quote newer
+            # than request-start time. Do not mislabel that current quote as future.
+            now = time.time()
         observed = _number(source.get("lastObservation"))
         verified = observed is not None and not source.get("error") and 0 <= now - observed <= 180
         kind = "live" if verified else "awaiting" if observed is None else "stale"
@@ -649,10 +753,16 @@ class Worker(threading.Thread):
                 self.runtime.lease_owned = owned
                 if owned:
                     # tick() renews again after collection, fencing stale collectors.
-                    self.runtime.tick()
-                    if self.runtime._renew_lease(now=time.time()):
+                    completed = self.runtime.tick()
+                    if completed and self.runtime.lease_owned:
                         from .hourly import hourly_monitor_tick
-                        hourly_monitor_tick(self.runtime.store, now=time.time())
+                        hourly_monitor_tick(
+                            self.runtime.store,
+                            now=time.time(),
+                            holder=self.runtime.boot_id,
+                            # Omit fence_now in production so the commit check uses
+                            # the actual wall clock rather than tick-start time.
+                        )
                     self.runtime.local_error = None
                 # A standby process must not write shared health: an active process
                 # could otherwise be overwritten as "standby" during a deployment.
@@ -660,10 +770,17 @@ class Worker(threading.Thread):
             except Exception as exc:  # Defensive worker boundary; HTTP remains responsive.
                 self.runtime.local_error = f"{type(exc).__name__}: {str(exc)[:180]}"
                 try:
-                    # Only the current lease holder may mutate shared global health.
-                    if self.runtime._renew_lease(now=time.time()):
-                        self.runtime._set_health(runtime="degraded", now=time.time(), error=self.runtime.local_error)
+                    # Do not reacquire after a failed/stale cycle. A degradation
+                    # write is allowed only when this process still owns a live
+                    # lease at its own fenced commit.
+                    if self.runtime.lease_owned:
+                        error_now = time.time()
+                        with self.runtime.store.lease_fence("optimizer-worker", self.runtime.boot_id):
+                            self.runtime._set_health(runtime="degraded", now=error_now, error=self.runtime.local_error)
+                except LeaseLost:
+                    self.runtime.lease_owned = False
                 except Exception:
+                    # Keep the local diagnostic but never write an unfenced error.
                     pass
                 self.backoff_seconds = min(max(self.poll_seconds, self.backoff_seconds * 2), 300.0)
             self.stop_event.wait(self.backoff_seconds)

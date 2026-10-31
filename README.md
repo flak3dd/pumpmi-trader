@@ -91,3 +91,19 @@ The managed dashboard is connected to the durable forward-paper optimizer. The s
 ## Health check from Manus Preview
 
 Open this project's Preview and use `/health` on that same origin. The development proxy forwards it to the real API and returns JSON, just as production does. `http://127.0.0.1:3001/health` is a sandbox-local address; opening it in a browser on your Mac does not reach this cloud server. A healthy response is `{"ok":true,"optimizer":"requested"}`. This is liveness only, not proof of a profitable strategy or fresh market data.
+
+## Slider-save concurrency
+
+Local file-backed saves now lock a stable sibling advisory file across processes for the entire read/revision-check/replace operation. Atomic JSON replacement alone does not provide compare-and-swap; the advisory lock closes that race. A simultaneous stale save receives a revision conflict instead of silently overwriting another value. Durable MySQL saves use the running adapter's transactional revision checks. An already-applied draft retry clears obsolete error text, while dragging again during an in-flight save preserves the newer draft and sends it against the returned revision.
+
+Run `pnpm test:sliders` for mocked browser-save races and `python3 -m pytest -q tests/test_strategy_cas.py` from `pump-board-engine` for local cross-process CAS, failure recovery, strict 15-second/increasing-duration validation, and immutable six-position limit checks. These commands never edit the real strategy or create production paper fills.
+
+## Worker handoff and atomic promotion
+
+Each durable worker write unit starts with a root lease fence. SQLite reserves its writer transaction with `BEGIN IMMEDIATE`; MySQL locks the lease row with `SELECT ... FOR UPDATE`. Ownership and expiry are checked again immediately before the root commit. Nested store operations use savepoints and cannot independently commit portfolio, observations, closed trades, counters, health, or hourly reports. Failed transaction setup restores transaction depth and closes its cursor; an attempt to place a worker fence inside an ordinary unfenced outer transaction is rejected.
+
+Collection happens outside database locks. Post-collection renewal can only extend an unexpired lease still belonging to that collector; it cannot reacquire an expired or handed-off lease to commit an old batch. The next worker cycle can acquire fresh authority normally. Trading inputs bypass telemetry caching, initialization inserts only missing state, and a persisted over-cap portfolio is rejected rather than reset or silently liquidated. At the separate 64-token watch cap, admission can safely retire the oldest decided non-held watch instead of permanently blocking new discovery; pending timelines and held tokens are protected.
+
+Candidate validation captures one strategy document before it begins. Promotion must CAS against that same revision. Config, audit, and promotion/rollback markers commit atomically, and a user save clears obsolete promotion rollback lineage. Newly watched tokens use settings re-read after collection; already-started watches retain their original durations. Frame freshness uses response-time wall-clock checking so a delayed read of a newer real quote is not falsely classified as future data.
+
+Run `pnpm test:concurrency` for two-connection SQLite handoff, six-position/seventh-entry denial, expiry, stale-cache, config/validation races, atomic failure rollback, initialization, admission, transaction-setup recovery, and old-batch rejection checks. MySQL lock SQL is checked in software, but destructive MySQL handoff/failure tests are not run against the shared live database. `scripts/verify_live_readonly.py` uses GET requests only to verify a running worker, current source state, preserved settings/bankroll, and at most six positions. These safeguards do not supply missing holder RPC data or establish a profitable strategy.

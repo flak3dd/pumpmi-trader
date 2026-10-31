@@ -6,7 +6,7 @@ The user approved always-on paper optimization with the disclosed usage-based ho
 
 ## Implementation approach
 
-Keep the existing high-voltage terminal, six-position cap, user watch settings, and paper-only risk controls. Add a deterministic application-owned worker within the reserved published Python process, backed by the managed MySQL database for durable observations, paper portfolios, revisions, and optimizer reports. The current user watch baseline is Short 165s, Medium 180s, Long 1065s; capture the actual config at initialization rather than replacing user edits with defaults. Keep fixture simulation isolated from this live-market-data paper dataset.
+Keep the existing high-voltage terminal, six-position cap, user watch settings, and paper-only risk controls. Add a deterministic application-owned worker within the reserved published Python process, backed by the managed MySQL database for durable observations, paper portfolios, revisions, and optimizer reports. The authoritative user watch baseline is Short 30s, Medium 180s, Long 1065s at revision 7; always read the current durable config rather than replacing user edits with defaults. Keep fixture simulation isolated from this live-market-data paper dataset.
 
 The worker performs bounded market-data collection with retry/backoff, explicit freshness/coverage diagnostics, and a database-backed lease to avoid duplicate workers during rolling deployments. It will not silently substitute fixtures if a public data endpoint fails. Source connectivity must be verified before reporting the feed active. Collection, cohort replay, and 30-minute review run within the service; do not use sandbox cron or traffic pingers to simulate persistent hosting.
 
@@ -26,3 +26,7 @@ Report gross P&L, modeled execution costs, net realized P&L, mark-to-market equi
 ## Deployment and data safety
 
 Enable managed database storage and request `hosting.mode=always_on` through the product's required confirmation flow. Publish only the committed version. Development and production share the managed database: seed only new optimizer namespaces and retain all existing strategy/user data. Runtime states survive restarts in MySQL, not container files. Keep secrets server-side and do not transfer sandbox-only model credentials. Push the source to the user's existing repository branch without force or changes to its remotes; keep managed canonical version saving separate.
+
+## Concurrency repair
+
+Use transactional lease ownership/expiry fencing for durable worker commits, atomic portfolio/ledger/state changes, fresh authoritative trading-state reads on handoff, and idempotent initialization. Keep slow network collection outside database locks. Capture a single strategy revision before validation; configuration plus audit and rollback/promotion markers commit as one operation. User saves cannot be overwritten by a candidate evaluated against an older revision or rolled back by obsolete promotion lineage. Refresh config after collection for newly created watches while existing timelines remain immutable. Serialize local file-backed CAS with a stable advisory lock; retain responsive telemetry caching but never use it as authoritative owner trading state. No risk threshold, live dataset, chosen duration, or six-position limit is relaxed to induce trades.

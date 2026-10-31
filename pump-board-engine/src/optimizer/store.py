@@ -1,9 +1,14 @@
 """Database-backed persistence for the paper-only optimizer.
 
-The service uses MySQL in production through ``DATABASE_URL`` and PyMySQL.  The
+The service uses MySQL in production through ``DATABASE_URL`` and PyMySQL. The
 same small SQL surface supports an injected SQLite connection for deterministic
-software tests.  Nothing in this module reads or writes checked-in board,
-ledger, fixture, or strategy files after the optional one-time seed input.
+software tests. Nothing in this module reads or writes checked-in board, ledger,
+fixture, or strategy files after the optional one-time seed input.
+
+The worker uses :meth:`lease_fence` for every durable mutation.  A fence is a
+single database transaction: it locks/checks the lease before work and checks
+owner plus expiry again immediately before commit. Nested store helpers use
+savepoints, so a helper can never commit independently from the outer fence.
 """
 from __future__ import annotations
 
@@ -33,6 +38,10 @@ class RevisionConflict(ValueError):
     """A durable strategy update lost its optimistic-concurrency race."""
 
 
+class LeaseLost(RuntimeError):
+    """A worker attempted to commit after its durable lease was lost or expired."""
+
+
 @dataclass(frozen=True)
 class DatabaseInfo:
     dialect: str
@@ -52,16 +61,23 @@ def _loads(value: Any, default: Any = None) -> Any:
 
 
 class DatabaseStore:
-    """A narrow DB-API adapter with additive migrations and JSON state records."""
+    """A narrow DB-API adapter with additive migrations and JSON state records.
+
+    ``transaction`` is intentionally re-entrant. The root context owns the
+    database commit; nested contexts use savepoints. That matters for a worker
+    cycle because helpers such as ``set_many_state`` and ``upsert_trade`` must
+    be one atomic unit with the portfolio and the lease expiry check.
+    """
 
     def __init__(self, database_url: str | None = None, *, connection: Any = None) -> None:
         self._state_cache: dict[str, tuple[float, Any]] = {}
+        self._lock = threading.RLock()
+        self._tx_local = threading.local()
         if connection is not None:
             self.dialect = "sqlite"
             self._connection = connection
             self._connection.row_factory = sqlite3.Row
             self._connection.execute("PRAGMA foreign_keys=ON")
-            self._lock = threading.RLock()
             self._database_url = "sqlite-injected"
             return
         if not database_url:
@@ -69,7 +85,6 @@ class DatabaseStore:
         self._database_url = database_url
         parsed = urlparse(database_url)
         scheme = parsed.scheme.lower()
-        self._lock = threading.RLock()
         self._connection = None
         if scheme.startswith("mysql"):
             self.dialect = "mysql"
@@ -140,41 +155,162 @@ class DatabaseStore:
     def _sql(self, statement: str) -> str:
         return statement.replace("?", "%s") if self.dialect == "mysql" else statement
 
+    def _tx_state(self) -> Any:
+        """Return per-thread transaction state without relying on globals."""
+        local = getattr(self, "_tx_local", None)
+        if local is None:  # Supports narrowly constructed cache-only unit tests.
+            local = threading.local()
+            self._tx_local = local
+        if not hasattr(local, "depth"):
+            local.depth = 0
+            local.savepoint = 0
+            local.fence = None
+        return local
+
+    def _connection_for_transaction(self) -> Any:
+        if self.dialect == "mysql" and (self._connection is None or not getattr(self._connection, "open", False)):
+            self._connection = self._mysql_connection()
+        if self._connection is None:
+            raise StoreUnavailable("optimizer database connection is unavailable")
+        return self._connection
+
     @contextmanager
-    def transaction(self) -> Iterator[Any]:
-        """One serialized connection; avoid a fresh TLS handshake per state read."""
+    def _transaction(self, *, immediate: bool = False) -> Iterator[Any]:
+        """Open a root transaction or a nested savepoint on this store connection."""
         with self._lock:
-            if self.dialect == "mysql" and (self._connection is None or not getattr(self._connection, "open", False)):
-                self._connection = self._mysql_connection()
-            connection = self._connection
-            if connection is None:
-                raise StoreUnavailable("optimizer database connection is unavailable")
+            state = self._tx_state()
+            previous_depth = int(state.depth)
+            outer = previous_depth == 0
+            connection = self._connection_for_transaction()
             cursor = connection.cursor()
+            savepoint: str | None = None
+            state.depth = previous_depth + 1
             try:
+                if outer:
+                    if self.dialect == "sqlite":
+                        # Always begin a real root transaction: otherwise the first
+                        # nested SAVEPOINT/RELEASE can commit independently of it.
+                        cursor.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                    else:
+                        begin = getattr(connection, "begin", None)
+                        if callable(begin):
+                            begin()
+                        else:  # pragma: no cover - DB-API compatibility fallback
+                            cursor.execute("START TRANSACTION")
+                else:
+                    state.savepoint = int(state.savepoint) + 1
+                    savepoint = f"optimizer_sp_{state.savepoint}"
+                    self._execute(cursor, f"SAVEPOINT {savepoint}")
                 yield cursor
-                connection.commit()
+                if savepoint is not None:
+                    self._execute(cursor, f"RELEASE SAVEPOINT {savepoint}")
+                elif outer:
+                    connection.commit()
             except Exception:
                 try:
-                    connection.rollback()
+                    if savepoint is not None:
+                        self._execute(cursor, f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        self._execute(cursor, f"RELEASE SAVEPOINT {savepoint}")
+                    elif outer:
+                        connection.rollback()
                 except Exception:
                     pass
-                if self.dialect == "mysql":
+                self._invalidate_state_cache()
+                if outer and self.dialect == "mysql":
+                    # A failed network/SQL operation can leave a pooled MySQL
+                    # connection indeterminate. Reopen lazily on the next call.
                     try:
                         connection.close()
                     finally:
                         self._connection = None
                 raise
             finally:
-                cursor.close()
+                # Setup failures belong here too, including BEGIN/SAVEPOINT errors.
+                state.depth = previous_depth
+                if outer:
+                    state.fence = None
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+
+    @contextmanager
+    def transaction(self) -> Iterator[Any]:
+        """One re-entrant DB transaction; nested calls use savepoints."""
+        with self._transaction() as cursor:
+            yield cursor
 
     def _execute(self, cursor: Any, statement: str, parameters: tuple[Any, ...] = ()) -> Any:
         cursor.execute(self._sql(statement), parameters)
         return cursor
 
+    def _is_fenced(self) -> bool:
+        return bool(getattr(self._tx_state(), "fence", None))
+
+    def _invalidate_state_cache(self, keys: set[str] | None = None) -> None:
+        """Drop local telemetry cache entries; never publish uncommitted worker data."""
+        with self._lock:
+            if keys is None:
+                self._state_cache.clear()
+            else:
+                for key in keys:
+                    self._state_cache.pop(key, None)
+
+    def _lease_select_sql(self) -> str:
+        suffix = " FOR UPDATE" if self.dialect == "mysql" else ""
+        return "SELECT holder, expires_at FROM optimizer_leases WHERE lease_name=?" + suffix
+
+    def _assert_lease(self, cursor: Any, lease_name: str, holder: str, *, now: float) -> None:
+        row = self._execute(cursor, self._lease_select_sql(), (lease_name,)).fetchone()
+        if not row or row["holder"] != holder or float(row["expires_at"]) <= float(now):
+            raise LeaseLost("optimizer worker lease is no longer owned or has expired")
+
+    @contextmanager
+    def lease_fence(self, lease_name: str, holder: str, *, now: float | None = None) -> Iterator[Any]:
+        """Fence a compact worker write unit by durable owner and wall-clock expiry.
+
+        Production callers omit ``now`` so both checks sample the actual wall clock.
+        Deterministic tests may pass one logical timestamp. The check immediately
+        before root commit rejects a holder that spent longer than its TTL inside
+        the transaction; all nested observations, trades, counters and state then
+        roll back together.
+        """
+        state = self._tx_state()
+        existing = state.fence
+        if existing is not None:
+            if existing["lease_name"] != lease_name or existing["holder"] != holder:
+                raise LeaseLost("cannot nest a different worker lease fence")
+            with self._transaction() as cursor:
+                self._assert_lease(cursor, lease_name, holder, now=float(now if now is not None else time.time()))
+                yield cursor
+            return
+        if int(state.depth) != 0:
+            # A savepoint cannot own the outer commit or its final expiry check.
+            # Require workers to start with a root fence, not wrap it in an
+            # ordinary transaction that could continue writing after fence exit.
+            raise StoreUnavailable("worker lease fence must start the root transaction")
+        with self._transaction(immediate=True) as cursor:
+            entry_now = float(now if now is not None else time.time())
+            self._assert_lease(cursor, lease_name, holder, now=entry_now)
+            # New/renewed ownership must not use a five-second telemetry snapshot
+            # as trading input. Reads under the fence also bypass the cache.
+            self._invalidate_state_cache()
+            state.fence = {"lease_name": lease_name, "holder": holder}
+            try:
+                yield cursor
+                commit_now = float(now if now is not None else time.time())
+                self._assert_lease(cursor, lease_name, holder, now=commit_now)
+            finally:
+                state.fence = None
+
+    # Name kept explicit for callers/tests that describe this as a worker transaction.
+    worker_transaction = lease_fence
+
     def migrate(self, seed_document: dict[str, Any] | None = None, *, now: float | None = None) -> bool:
-        """Create only optimizer-owned tables and seed only a missing config row."""
+        """Create only optimizer-owned tables and atomically seed only a missing config row."""
         now = time.time() if now is None else now
-        with self.transaction() as cur:
+        seeded = False
+        with self._transaction(immediate=self.dialect == "sqlite") as cur:
             if self.dialect == "mysql":
                 statements = [
                     """CREATE TABLE IF NOT EXISTS optimizer_schema_versions (
@@ -248,78 +384,136 @@ class DatabaseStore:
             else:
                 self._execute(cur, "INSERT OR IGNORE INTO optimizer_schema_versions(version, applied_at) VALUES (?, ?)", (SCHEMA_VERSION, now))
             if seed_document is not None:
-                existing = self._execute(cur, "SELECT revision FROM optimizer_strategy_config WHERE namespace=?", (FORWARD_NAMESPACE,)).fetchone()
-                if not existing:
-                    self._execute(
+                if self.dialect == "mysql":
+                    inserted = self._execute(
                         cur,
-                        "INSERT INTO optimizer_strategy_config(namespace, revision, document_json, updated_at, source) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT IGNORE INTO optimizer_strategy_config(namespace, revision, document_json, updated_at, source) VALUES (?, ?, ?, ?, ?)",
                         (FORWARD_NAMESPACE, int(seed_document["revision"]), _json(seed_document), now, "file_seed"),
                     )
-                    return True
-        return False
+                else:
+                    inserted = self._execute(
+                        cur,
+                        "INSERT OR IGNORE INTO optimizer_strategy_config(namespace, revision, document_json, updated_at, source) VALUES (?, ?, ?, ?, ?)",
+                        (FORWARD_NAMESPACE, int(seed_document["revision"]), _json(seed_document), now, "file_seed"),
+                    )
+                seeded = bool(inserted.rowcount == 1)
+        return seeded
 
     def get_config(self) -> dict[str, Any] | None:
         with self.transaction() as cur:
             row = self._execute(cur, "SELECT document_json FROM optimizer_strategy_config WHERE namespace=?", (FORWARD_NAMESPACE,)).fetchone()
         return _loads(row["document_json"] if row else None)
 
+    def _write_config(self, cur: Any, document: dict[str, Any], expected_revision: int, *, source: str, now: float) -> None:
+        cursor = self._execute(
+            cur,
+            "UPDATE optimizer_strategy_config SET document_json=?, revision=?, updated_at=?, source=? WHERE namespace=? AND revision=?",
+            (_json(document), int(document["revision"]), now, source, FORWARD_NAMESPACE, expected_revision),
+        )
+        if cursor.rowcount != 1:
+            raise RevisionConflict("strategy revision conflict")
+
     def update_config(self, document: dict[str, Any], expected_revision: int, *, source: str, now: float | None = None) -> dict[str, Any]:
+        """Backward-compatible bare CAS. User-facing writes should use the atomic helper below."""
         now = time.time() if now is None else now
         with self.transaction() as cur:
-            cursor = self._execute(
-                cur,
-                "UPDATE optimizer_strategy_config SET document_json=?, revision=?, updated_at=?, source=? WHERE namespace=? AND revision=?",
-                (_json(document), int(document["revision"]), now, source, FORWARD_NAMESPACE, expected_revision),
-            )
-            if cursor.rowcount != 1:
-                raise RevisionConflict("strategy revision conflict")
+            self._write_config(cur, document, expected_revision, source=source, now=now)
         return document
 
-    def get_state(self, key: str, default: Any = None) -> Any:
+    def _write_state(self, cur: Any, key: str, value: Any, *, now: float, only_if_missing: bool = False) -> None:
+        encoded = _json(value)
+        if only_if_missing:
+            if self.dialect == "mysql":
+                statement = "INSERT IGNORE INTO optimizer_state(namespace, state_key, value_json, updated_at) VALUES (?, ?, ?, ?)"
+            else:
+                statement = "INSERT OR IGNORE INTO optimizer_state(namespace, state_key, value_json, updated_at) VALUES (?, ?, ?, ?)"
+        elif self.dialect == "mysql":
+            statement = """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
+                VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value_json=VALUES(value_json), updated_at=VALUES(updated_at)"""
+        else:
+            statement = """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
+                VALUES (?, ?, ?, ?) ON CONFLICT(namespace, state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at"""
+        self._execute(cur, statement, (FORWARD_NAMESPACE, key, encoded, now))
+
+    def initialize_state_if_missing(self, values: dict[str, Any], *, now: float | None = None) -> None:
+        """Idempotently initialize only absent state rows under one transaction.
+
+        Competing starts can both call this safely; no existing portfolio, user
+        state, active-promotion marker, or telemetry row is reset.
+        """
+        now = time.time() if now is None else now
+        with self._transaction(immediate=self.dialect == "sqlite") as cur:
+            for key, value in values.items():
+                self._write_state(cur, key, value, now=now, only_if_missing=True)
+        self._invalidate_state_cache(set(values))
+
+    def get_state(self, key: str, default: Any = None, *, fresh: bool = False) -> Any:
+        # SQLite tests intentionally exercise the same five-second cache/handoff
+        # behavior as MySQL. Fences and explicit fresh worker reads always bypass it.
+        use_cache = not fresh and not self._is_fenced()
         with self._lock:
-            cached = self._state_cache.get(key) if self.dialect == "mysql" else None
+            cached = self._state_cache.get(key) if use_cache else None
             if cached is not None and time.monotonic() - cached[0] < 5:
                 return copy.deepcopy(cached[1])
-            with self.transaction() as cur:
-                row = self._execute(cur, "SELECT value_json FROM optimizer_state WHERE namespace=? AND state_key=?", (FORWARD_NAMESPACE, key)).fetchone()
-            value = default if row is None else _loads(row["value_json"], default)
-            if self.dialect == "mysql" and row is not None:
+        with self.transaction() as cur:
+            row = self._execute(cur, "SELECT value_json FROM optimizer_state WHERE namespace=? AND state_key=?", (FORWARD_NAMESPACE, key)).fetchone()
+        value = default if row is None else _loads(row["value_json"], default)
+        if use_cache and row is not None:
+            with self._lock:
                 self._state_cache[key] = (time.monotonic(), copy.deepcopy(value))
-            return copy.deepcopy(value)
+        return copy.deepcopy(value)
 
     def set_state(self, key: str, value: Any, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
-        encoded = _json(value)
         with self.transaction() as cur:
-            if self.dialect == "mysql":
-                self._execute(cur, """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
-                    VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value_json=VALUES(value_json), updated_at=VALUES(updated_at)""", (FORWARD_NAMESPACE, key, encoded, now))
-            else:
-                self._execute(cur, """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
-                    VALUES (?, ?, ?, ?) ON CONFLICT(namespace, state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at""", (FORWARD_NAMESPACE, key, encoded, now))
-
-        if self.dialect == "mysql":
-            with self._lock:
-                self._state_cache[key] = (time.monotonic(), copy.deepcopy(value))
+            self._write_state(cur, key, value, now=now)
+        # Invalidate rather than update cache. The call may have been a nested
+        # savepoint under an outer fence that later rolls back.
+        self._invalidate_state_cache({key})
 
     def set_many_state(self, values: dict[str, Any], *, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self.transaction() as cur:
             for key, value in values.items():
-                encoded = _json(value)
-                if self.dialect == "mysql":
-                    statement = """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
-                        VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE value_json=VALUES(value_json), updated_at=VALUES(updated_at)"""
-                else:
-                    statement = """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
-                        VALUES (?, ?, ?, ?) ON CONFLICT(namespace, state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at"""
-                self._execute(cur, statement, (FORWARD_NAMESPACE, key, encoded, now))
+                self._write_state(cur, key, value, now=now)
+        self._invalidate_state_cache(set(values))
 
-        if self.dialect == "mysql":
-            with self._lock:
-                stamp = time.monotonic()
-                for key, value in values.items():
-                    self._state_cache[key] = (stamp, copy.deepcopy(value))
+    def _write_audit(self, cur: Any, action: str, detail: dict[str, Any], *, at: float) -> None:
+        self._execute(cur, "INSERT INTO optimizer_audits(namespace, at, action, detail_json) VALUES (?, ?, ?, ?)", (FORWARD_NAMESPACE, at, action, _json(detail)))
+
+    def update_user_config_with_audit(self, document: dict[str, Any], expected_revision: int, detail: dict[str, Any], *, now: float | None = None) -> None:
+        """Atomically CAS a user document, audit it, and retire rollback state."""
+        now = time.time() if now is None else now
+        with self.transaction() as cur:
+            self._write_config(cur, document, expected_revision, source="user", now=now)
+            self._write_audit(cur, detail.get("action", "user_strategy_update"), detail, at=now)
+            # A manual edit is authoritative. Clearing this marker in the same
+            # transaction prevents a later rollback from restoring stale settings.
+            self._write_state(cur, "active_promotion", None, now=now)
+        self._invalidate_state_cache({"active_promotion"})
+
+    def update_config_with_audit_and_state(
+        self,
+        document: dict[str, Any],
+        expected_revision: int,
+        detail: dict[str, Any],
+        *,
+        state_values: dict[str, Any],
+        source: str = "optimizer",
+        now: float | None = None,
+    ) -> None:
+        """Atomically CAS config, audit, and promotion/rollback state records.
+
+        When called under :meth:`lease_fence`, this joins its outer transaction and
+        therefore also receives the final owner/expiry check before commit.
+        """
+        now = time.time() if now is None else now
+        with self.transaction() as cur:
+            self._write_config(cur, document, expected_revision, source=source, now=now)
+            self._write_audit(cur, detail.get("action", "promotion"), detail, at=now)
+            for key, value in state_values.items():
+                self._write_state(cur, key, value, now=now)
+        self._invalidate_state_cache(set(state_values))
 
     def acquire_lease(self, lease_name: str, holder: str, *, ttl_seconds: float, now: float | None = None) -> bool:
         """Acquire/renew one worker lease atomically; stale deployments can recover."""
@@ -329,16 +523,40 @@ class DatabaseStore:
             if self.dialect == "mysql":
                 self._execute(cur, """INSERT INTO optimizer_leases(lease_name, holder, expires_at, updated_at)
                     VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE
-                    holder=IF(expires_at < ? OR holder = ?, VALUES(holder), holder),
-                    expires_at=IF(expires_at < ? OR holder = ?, VALUES(expires_at), expires_at),
-                    updated_at=VALUES(updated_at)""", (lease_name, holder, expires, now, now, holder, now, holder))
+                    holder=IF(expires_at <= ? OR holder = ?, VALUES(holder), holder),
+                    expires_at=IF(expires_at <= ? OR holder = ?, VALUES(expires_at), expires_at),
+                    updated_at=IF(expires_at <= ? OR holder = ?, VALUES(updated_at), updated_at)""", (lease_name, holder, expires, now, now, holder, now, holder, now, holder))
             else:
                 self._execute(cur, """INSERT INTO optimizer_leases(lease_name, holder, expires_at, updated_at)
                     VALUES (?, ?, ?, ?) ON CONFLICT(lease_name) DO UPDATE SET
                     holder=excluded.holder, expires_at=excluded.expires_at, updated_at=excluded.updated_at
-                    WHERE optimizer_leases.expires_at < ? OR optimizer_leases.holder = ?""", (lease_name, holder, expires, now, now, holder))
+                    WHERE optimizer_leases.expires_at <= ? OR optimizer_leases.holder = ?""", (lease_name, holder, expires, now, now, holder))
             row = self._execute(cur, "SELECT holder, expires_at FROM optimizer_leases WHERE lease_name=?", (lease_name,)).fetchone()
-        return bool(row and row["holder"] == holder and float(row["expires_at"]) >= expires)
+        owned = bool(row and row["holder"] == holder and float(row["expires_at"]) >= expires)
+        if owned:
+            # Acquisition/renewal is also a handoff boundary for five-second cache
+            # values. New owner reads must be authoritative trading state.
+            self._invalidate_state_cache()
+        return owned
+
+    def renew_lease(self, lease_name: str, holder: str, *, ttl_seconds: float, now: float | None = None) -> bool:
+        """Extend only an unexpired, continuously owned lease; never reacquire it.
+
+        The worker loop may acquire a new lease for a new collection cycle. A
+        post-collection renewal must instead discard a batch if authority expired
+        or changed while that batch was being collected, even if a successor has
+        since released or expired its lease.
+        """
+        now = time.time() if now is None else now
+        with self._transaction(immediate=True) as cur:
+            row = self._execute(cur, self._lease_select_sql(), (lease_name,)).fetchone()
+            if not row or row["holder"] != holder or float(row["expires_at"]) <= float(now):
+                return False
+            self._execute(cur,
+                "UPDATE optimizer_leases SET expires_at=?, updated_at=? WHERE lease_name=? AND holder=?",
+                (float(now) + ttl_seconds, now, lease_name, holder))
+        self._invalidate_state_cache()
+        return True
 
     def release_lease(self, lease_name: str, holder: str) -> None:
         with self.transaction() as cur:
@@ -407,16 +625,18 @@ class DatabaseStore:
     def audit(self, action: str, detail: dict[str, Any], *, at: float | None = None) -> None:
         at = time.time() if at is None else at
         with self.transaction() as cur:
-            self._execute(cur, "INSERT INTO optimizer_audits(namespace, at, action, detail_json) VALUES (?, ?, ?, ?)", (FORWARD_NAMESPACE, at, action, _json(detail)))
+            self._write_audit(cur, action, detail, at=at)
 
     def promote_config_with_audit(self, document: dict[str, Any], expected_revision: int, detail: dict[str, Any], *, now: float | None = None) -> None:
-        """Atomically persist a reviewed promotion/rollback and its audit record."""
-        now = time.time() if now is None else now
-        with self.transaction() as cur:
-            cursor = self._execute(cur, "UPDATE optimizer_strategy_config SET document_json=?, revision=?, updated_at=?, source=? WHERE namespace=? AND revision=?", (_json(document), document["revision"], now, "optimizer", FORWARD_NAMESPACE, expected_revision))
-            if cursor.rowcount != 1:
-                raise RevisionConflict("strategy revision conflict")
-            self._execute(cur, "INSERT INTO optimizer_audits(namespace, at, action, detail_json) VALUES (?, ?, ?, ?)", (FORWARD_NAMESPACE, now, detail.get("action", "promotion"), _json(detail)))
+        """Backward-compatible atomic config/audit CAS without promotion markers."""
+        self.update_config_with_audit_and_state(
+            document,
+            expected_revision,
+            detail,
+            state_values={},
+            source="optimizer",
+            now=now,
+        )
 
     def close(self) -> None:
         if self.dialect == "sqlite" and self._connection is not None:

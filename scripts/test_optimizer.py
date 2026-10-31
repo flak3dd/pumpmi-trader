@@ -113,6 +113,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(len(positions), 6)
         # A flat hard exit has zero gross P&L and 2% modeled cost on each side.
         outcome = apply_observation(portfolio, positions[0]["id"], known_observation("M0", 2401, 30_000))
+        assert outcome is not None
         self.assertEqual(outcome["status"], "closed")
         self.assertAlmostEqual(outcome["gross"], 0.0, places=6)
         self.assertAlmostEqual(outcome["costs"], 5.2, places=6)  # 130 * (2% entry + 2% exit)
@@ -167,6 +168,7 @@ class OptimizerTests(unittest.TestCase):
             "source": {"name": "mock-test-only", "lastObservation": now, "error": None, "observations": len(observations), "trackedTokens": 30, "social": "unavailable"},
             "tracked": {f"live-{index}": {"mint": f"live-{index}"} for index in range(30)},
         }, now=now)
+        self.own_lease(runtime, now=now)
         runtime.maybe_review(now=now)
         validation = runtime.status(now=now)["validation"]
         self.assertEqual(validation["state"], "promoted")
@@ -187,6 +189,7 @@ class OptimizerTests(unittest.TestCase):
         self.store.set_many_state({"active_promotion": {"previous": previous, "promoted": promoted, "at": 10}, "portfolio": portfolio})
         _, validation = runtime._run_rollback_if_needed(now=20, portfolio=portfolio)
         self.assertIsNotNone(validation)
+        assert validation is not None
         self.assertEqual(validation["state"], "rolled_back")
         self.assertEqual(runtime.config()["revision"], 7)
         self.assertEqual(runtime.config()["watchPeriods"], previous["watchPeriods"])
@@ -303,6 +306,7 @@ class OptimizerTests(unittest.TestCase):
             DatabaseStore("mysql://user:secret@managed.example:4000/optimizer?ssl=true")._mysql_connection()
         context = captured.get("ssl")
         self.assertIsInstance(context, ssl.SSLContext)
+        assert isinstance(context, ssl.SSLContext)
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
 
@@ -425,6 +429,8 @@ class OptimizerTests(unittest.TestCase):
         self.own_lease(runtime, 0)
         runtime.tick(now=1)
         runtime.tick(now=62)
+        # Model Worker.run acquiring a new cycle lease after the long time jump.
+        self.own_lease(runtime, 2463)
         runtime.tick(now=2463)
         payload = runtime.snapshot_payload()
         stats = payload["board"]["stats"]
@@ -459,6 +465,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(any(not window["hasTrades"] and window["net"] == 0 for window in windows))
         self.assertTrue(all(window["net"] <= 0 or window["hasTrades"] for window in windows))
         # With no coverage, a boundary review waits; repeated same boundary creates one audit row.
+        self.own_lease(runtime, now=7201)
         runtime.maybe_review(now=7201)
         runtime.maybe_review(now=7210)
         self.assertEqual(len(self.store.reviews()), 1)

@@ -10,9 +10,10 @@ import json
 import math
 import os
 import tempfile
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = ENGINE_ROOT / "strategy.json"
@@ -121,11 +122,45 @@ def _atomic_write(path: Path, document: Mapping[str, Any]) -> None:
         raise
 
 
+@contextmanager
+def _config_write_lock(target: Path) -> Iterator[None]:
+    """Lock a stable sibling file, not the JSON inode replaced by os.replace.
+
+    Separate handles contend across both threads and processes. Readers continue
+    to see complete JSON; only the read/check/replace write sequence is serialized.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(f".{target.name}.lock")
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def update_strategy_config(update: Any, path: str | Path | None = None) -> dict[str, Any]:
     """Apply a strict optimistic-concurrency update and atomically persist it.
 
     Only the slider values and the revision are accepted.  The fixed six-position
-    cap is never copied from a request body.
+    cap is never copied from a request body. A stable advisory lock makes the
+    revision check plus replacement one cross-process compare-and-swap.
     """
     if not isinstance(update, dict) or set(update) != {"watchPeriods", "revision"}:
         raise StrategyConfigError("strategy update accepts only watchPeriods and revision")
@@ -133,18 +168,19 @@ def update_strategy_config(update: Any, path: str | Path | None = None) -> dict[
         raise StrategyConfigError("revision must be a non-negative integer")
     watch_periods = validate_watch_periods(update["watchPeriods"])
     target = config_path(path)
-    current = load_strategy_config(target)
     revision = int(update["revision"])
-    if revision != current["revision"]:
-        raise StrategyRevisionConflict("strategy revision conflict")
-    next_document = {
-        "version": 1,
-        "revision": current["revision"] + 1,
-        "watchPeriods": watch_periods,
-        "max_open": 6,
-    }
-    _atomic_write(target, next_document)
-    return next_document
+    with _config_write_lock(target):
+        current = load_strategy_config(target)
+        if revision != current["revision"]:
+            raise StrategyRevisionConflict("strategy revision conflict")
+        next_document = {
+            "version": 1,
+            "revision": current["revision"] + 1,
+            "watchPeriods": watch_periods,
+            "max_open": 6,
+        }
+        _atomic_write(target, next_document)
+        return next_document
 
 
 def effective_strategy(base_strategy: Mapping[str, Any], path: str | Path | None = None) -> dict[str, Any]:

@@ -11,6 +11,8 @@
     "check": "tsc -b",
     "test:api": "python3 scripts/test_api.py",
     "test:ui": "tsx scripts/test_ui.tsx",
+    "test:sliders": "tsx scripts/test_slider_concurrency.tsx",
+    "test:concurrency": "python3 scripts/test_concurrency.py && python3 scripts/test_transaction_edges.py",
     "format": "prettier --write src vite.config.ts scripts/test_ui.tsx",
     "start": "python3 scripts/serve.py"
   },

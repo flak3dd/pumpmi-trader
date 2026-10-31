@@ -17,3 +17,6 @@ __pycache__/
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Local strategy CAS advisory locks
+.*.json.lock
