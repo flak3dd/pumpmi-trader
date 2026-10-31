@@ -393,11 +393,22 @@ await screen.findAllByText("$131K");
 const requestsBeforeDisconnect = [...requests];
 await act(async () => MockEventSource.instances[0].emitError());
 await screen.findByText("LIVE FEED DISCONNECTED");
-assert.ok(screen.getByText(/Live feed disconnected/));
+assert.ok(screen.getByText(/Live feed interrupted/));
+assert.equal(
+  MockEventSource.instances[0].closed,
+  false,
+  "a transient error must not disable native EventSource automatic reconnection",
+);
 assert.deepEqual(
   requests,
   requestsBeforeDisconnect,
   "a stream disconnect must retain the live frame rather than load history",
+);
+await act(async () => MockEventSource.instances[0].emitFeed(updatedFrame));
+assert.equal(
+  screen.queryByText("LIVE FEED DISCONNECTED"),
+  null,
+  "a recovered event on the same stream resumes display without a user click",
 );
 assert.ok(
   !requests.some(

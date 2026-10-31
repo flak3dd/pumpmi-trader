@@ -388,6 +388,7 @@ class OptimizerTests(unittest.TestCase):
 
         locked = apply_observation(portfolio, position["id"], known_observation("LOCK", 120, 33_000))
         self.assertEqual(locked and locked["status"], "closed")
+        assert locked is not None
         self.assertTrue((locked or {}).get("reason", "").startswith("profit lock"))
         self.assertGreater(float((locked or {}).get("net") or 0), 0)
         # The same path used to ride 30k -> 36k -> 33k -> 24k into a -20% stop, net about -30.68.

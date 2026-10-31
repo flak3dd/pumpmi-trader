@@ -1187,9 +1187,10 @@ export default function App() {
           }
         });
         source.onerror = () => {
-          source?.close();
+          // Keep the EventSource alive: the browser automatically retries a
+          // dropped connection. Closing here disables recovery after a handoff.
           markFeedDisconnected(
-            "Live feed disconnected. Reconnect to resume updates.",
+            "Live feed interrupted. Reconnecting automatically…",
             generation,
           );
         };
