@@ -13,6 +13,8 @@ v8 expected-edge revision (not a profitability claim):
   D1 top-3 buyers above 45% of buy SOL skip. The 20% single-wallet cap still applies.
   D2 fewer than 8 buyers of at least 0.05 SOL skip; the 70–85% curve band requires 12.
   Both distribution terms also scale size inside the same $130–160 band. Fees stay 100 bps.
+  L5 the last watch window needs 3 buyers and no wallet above 50% of that window's buy SOL.
+  M5 once net peaks at +8%, a 6-point giveback exits before the +25% scale. The scale still comes first.
 """
 import base64
 import json
@@ -32,9 +34,9 @@ from .kanban_state import Board
 from .curve import parse_curve_account, buy_fill, sell_eff
 from .flow import (
     summarize, trade_from_tx, flow_allows, accelerating, flow_reversed,
-    signal_strength, size_for_signal,
+    signal_strength, size_for_signal, with_last_window, last_window_allows,
 )
-from .exits import emergency_drop, net_change_pct, vol_stop_pct
+from .exits import emergency_drop, net_change_pct, vol_stop_pct, profit_lock_hit
 
 PF = "https://frontend-api-v3.pump.fun"
 RPC = "https://api.mainnet-beta.solana.com"
@@ -47,10 +49,12 @@ STRAT = dict(
     flow_max_top3_pct=45, flow_meaningful_sol=0.05, flow_min_meaningful_buyers=8,
     flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
+    flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,
     stop_loss_pct=-15, vol_stop_floor_pct=4, vol_stop_mult=2, vol_stop_min_samples=4, be_arm_pct=15,
+    profit_lock_arm_pct=8, profit_lock_giveback_pct=6,
     scale_out_pct=25, trail_giveback_pct=12, flat_exit_s=720, flat_exit_below_pct=5,
     hard_exit_s=2400, flatten_curve_pct=95,
     v6_size_mult=1.5, v6_trail_relax=1.20, v6_min_hist=30, v7_boost_eq_pct=8, v7_boost_usd_max=500,
@@ -289,8 +293,35 @@ class Feed:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return {mint: snap for mint, snap in pool.map(one, mints) if snap and snap.get("spot")}
 
-    def flow_for(self, coin, since_ts):
-        """Swap tape since ``since_ts``. None means the tape is missing or too incomplete to trust."""
+    @staticmethod
+    def _last_window_start(watch: dict) -> float | None:
+        """Timestamp where the long slice starts: the moment the medium tier was actually observed.
+
+        The scheduled medium duration is not used. A late sample would otherwise
+        count trades whose SOL was already inside the medium slice. Missing or
+        non-positive elapsed time fails closed.
+        """
+        medium = (watch.get("watch_periods") or {}).get("medium") or {}
+        if medium.get("status") != "observed":
+            return None
+        try:
+            elapsed = float(medium["elapsed_s"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if elapsed <= 0:
+            return None
+        try:
+            return float(watch["t"]) + elapsed
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def flow_for(self, coin, since_ts, last_window_ts=None):
+        """Swap tape since ``since_ts``. None means the tape is missing or too incomplete to trust.
+
+        ``last_window_ts`` marks the long slice. The summary then carries that
+        slice's buyer count and top-buyer share. A missing cutoff leaves those
+        fields empty so the entry gate skips.
+        """
         curve = coin.get("bonding_curve")
         if not curve:
             return None
@@ -307,7 +338,7 @@ class Feed:
             and row.get("blockTime") and row["blockTime"] >= since_ts
         ]
         if not rows:
-            return summarize([])
+            return with_last_window(summarize([]), [], last_window_ts)
         batch = [
             {"jsonrpc": "2.0", "id": index, "method": "getTransaction",
              "params": [row["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 1}]}
@@ -330,7 +361,8 @@ class Feed:
                 trades.append(trade)
         if results and missing * 2 > len(results):
             return None
-        return summarize(trades, meaningful_sol=float(self.strategy["flow_meaningful_sol"]))
+        summary = summarize(trades, meaningful_sol=float(self.strategy["flow_meaningful_sol"]))
+        return with_last_window(summary, trades, last_window_ts)
 
     def holders(self, coin):
         try:
@@ -451,12 +483,15 @@ class Feed:
         )
         if not accel_ok:
             return self.skip(key, accel_why, False, coin)
-        flow = self.flow_for(coin, watch["t"])
+        flow = self.flow_for(coin, watch["t"], self._last_window_start(watch))
         if flow is None:
             return self.skip(key, "flow unavailable", False, coin)
         flow_ok, flow_why = flow_allows(flow, rules, strong=strong)
         if not flow_ok:
             return self.skip(key, flow_why, False, coin)
+        late_ok, late_why = last_window_allows(flow, rules)
+        if not late_ok:
+            return self.skip(key, late_why, False, coin)
         snap = self.social(symbol)
         half = False
         if snap == "RATE":
@@ -527,7 +562,7 @@ class Feed:
         entry_eff = filled["entry_eff"]
         feat["size_pct_equity"] = round(100 * usd / max(self.equity(), 1), 2)
         why = (
-            f"v8 PASS: curve {watch['curve']}->{curve}%, {accel_why}, {flow_why}, {social_why}, "
+            f"v8 PASS: curve {watch['curve']}->{curve}%, {accel_why}, {flow_why}, {late_why}, {social_why}, "
             f"top10 {top10}%, dev {dev}%, fill eff ${entry_eff:,.0f} vs spot ${mcap:,.0f}{sim_why}"
         )
         self.traded.add(key)
@@ -663,6 +698,7 @@ class Feed:
             position.setdefault("rets", []).append(spot / previous - 1)
             position["rets"] = position["rets"][-30:]
         position["peak"] = max(position.get("peak", spot), spot)
+        position["peak_net"] = max(float(position.get("peak_net", net)), net)
         self.board.put(key, "holding", pnl=round(position["usd"] * net / 100, 2), pnl_pct=round(net, 1), mcap=round(spot))
         if flow_reversed(
             position.get("entry_real_sol"), snap.get("real_sol"), position.get("entry_flow_sol") or 0,
@@ -701,6 +737,16 @@ class Feed:
         if not position.get("scaled") and net >= rules["scale_out_pct"]:
             # The trigger used full-size impact, so the half is filled at that same effective mark.
             self.close(key, spot, f"half at {net:+.0f}%", frac=0.5, exit_eff=exit_price)
+            return
+        peak_net = float(position.get("peak_net", net))
+        if not position.get("scaled") and profit_lock_hit(
+            peak_net, net, rules["profit_lock_arm_pct"], rules["profit_lock_giveback_pct"],
+        ):
+            self.close(
+                key, spot,
+                f"profit lock {net:+.0f}% (peak {peak_net:+.0f}%)",
+                exit_eff=exit_price,
+            )
             return
         trail = position.get("trail_giveback_pct", rules["trail_giveback_pct"])
         if position.get("scaled") and spot < position["peak"] * (1 - trail / 100):

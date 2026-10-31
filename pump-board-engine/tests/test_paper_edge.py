@@ -58,6 +58,7 @@ def _flow(buyers=16):
         "signed_quote_sol": 1.5, "buy_sol": 2.4, "sell_sol": 0.9, "imbalance": 2.6,
         "unique_buyers": buyers, "top_buyer_pct": 8.0, "top3_buyer_pct": 18.0,
         "meaningful_buyers": buyers, "trades": buyers + 2,
+        "last_window_buyers": buyers, "last_window_top_pct": 12.0, "last_window_buy_sol": 0.8,
     }
 
 
@@ -96,6 +97,10 @@ def test_rules_stay_paper_only_and_keep_six_slots():
     assert STRAT["flow_meaningful_sol"] == 0.05
     assert STRAT["flow_min_meaningful_buyers"] == 8
     assert STRAT["flow_strong_meaningful_buyers"] == 12
+    assert STRAT["flow_last_window_min_buyers"] == 3
+    assert STRAT["flow_last_window_max_whale_pct"] == 50
+    assert STRAT["profit_lock_arm_pct"] == 8
+    assert STRAT["profit_lock_giveback_pct"] == 6
     try:
         Feed({"mode": "live", "bankroll_usd": 100})
     except AssertionError:
@@ -119,7 +124,7 @@ def test_missing_flow_replies_and_holders_do_not_soft_pass(tmp_path: Path) -> No
         feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 1
         feed.social = lambda _symbol: None
-        feed.flow_for = lambda _coin, _since: None
+        feed.flow_for = lambda _coin, _since, _last=None: None
         _run_watch(feed, coin, now)
         assert not feed.pos
         assert feed.ledger.skips[-1][1] == "flow unavailable"
@@ -154,7 +159,7 @@ def test_upper_band_needs_stronger_breadth_and_boost_is_capped_at_one_and_a_half
         feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 1
         feed.social = lambda _symbol: {"mention_volume": 500, "sentiment_0_100": 80}
-        feed.flow_for = lambda _coin, _since: _flow(16)
+        feed.flow_for = lambda _coin, _since, _last=None: _flow(16)
         _run_watch(feed, coin, now, curve=80)
         assert not feed.pos
         assert "buyers 16 < 25" in feed.ledger.skips[-1][1]
@@ -162,7 +167,7 @@ def test_upper_band_needs_stronger_breadth_and_boost_is_capped_at_one_and_a_half
         now[0] = 1000.0
         rich = _coin(symbol="BOOST", mint="boost-mint-001")
         feed.social = lambda _symbol: {"mention_volume": 500, "sentiment_0_100": 80}
-        feed.flow_for = lambda _coin, _since: _flow(30)
+        feed.flow_for = lambda _coin, _since, _last=None: _flow(30)
         feed.http = lambda *_a, **_k: dict(rich)  # noqa: unused, recheck uses the patched http
         with patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(rich)):
             _run_watch(feed, rich, now, curve=40)
@@ -203,14 +208,34 @@ def test_exits_emergency_vol_breakeven_and_flow_reversal(tmp_path: Path) -> None
         assert "VOL" not in feed.pos
         assert feed.ledger.fills[-1][5].startswith("vol stop")
 
+        plant("ARM")
+        feed.apply_mark("ARM", {"spot": 120})
+        assert feed.pos["ARM"]["be_armed"] is True
+
+        # A peak under the profit-lock arm still uses break-even once that stop was armed.
+        # The step is inside the 10% emergency gap.
         plant("BE")
-        feed.apply_mark("BE", {"spot": 120})
-        assert feed.pos["BE"]["be_armed"] is True
-        # Steps stay inside the 10% emergency gap until the fee-inclusive mark is back through entry.
-        for spot in (114, 108, 102):
-            feed.apply_mark("BE", {"spot": spot})
+        feed.pos["BE"]["be_armed"] = True
+        feed.pos["BE"]["peak_net"] = 4.0
+        feed.pos["BE"]["last_spot"] = 105
+        feed.apply_mark("BE", {"spot": 100})
         assert "BE" not in feed.pos
         assert feed.ledger.fills[-1][5].startswith("break-even")
+
+        plant("LOCK")
+        feed.apply_mark("LOCK", {"spot": 112})
+        assert "LOCK" in feed.pos
+        assert not feed.pos["LOCK"].get("be_armed")
+        feed.apply_mark("LOCK", {"spot": 105})
+        assert "LOCK" not in feed.pos
+        assert feed.ledger.fills[-1][5].startswith("profit lock")
+        assert feed.ledger.fills[-1][4] > 0
+
+        plant("SCALE")
+        feed.apply_mark("SCALE", {"spot": 130})
+        assert feed.pos["SCALE"].get("scaled") is True
+        feed.apply_mark("SCALE", {"spot": 118})
+        assert "SCALE" in feed.pos
 
         plant("FLOW", spot=100)
         feed.apply_mark("FLOW", {"spot": 100, "real_sol": 9_600_000_000})
@@ -243,14 +268,14 @@ def test_distribution_gates_skip_before_a_paper_buy(tmp_path: Path) -> None:
         feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 1
         feed.social = lambda _symbol: None
-        feed.flow_for = lambda _coin, _since: concentrated
+        feed.flow_for = lambda _coin, _since, _last=None: concentrated
         _run_watch(feed, holder["coin"], now)
         assert not feed.pos
         assert feed.ledger.skips[-1][1].startswith("flow top3")
 
         now[0] = 1000.0
         holder["coin"] = _coin(symbol="DUST", mint="dust-mint-0001")
-        feed.flow_for = lambda _coin, _since: dust
+        feed.flow_for = lambda _coin, _since, _last=None: dust
         _run_watch(feed, holder["coin"], now)
         assert not feed.pos
         assert "meaningful" in feed.ledger.skips[-1][1]
@@ -303,7 +328,7 @@ def test_fading_rate_on_the_saved_watch_does_not_buy(tmp_path: Path) -> None:
         feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 1
         feed.social = lambda _symbol: None
-        feed.flow_for = lambda _coin, _since: _flow(16)
+        feed.flow_for = lambda _coin, _since, _last=None: _flow(16)
         feed.curve_state = lambda _coin: _state(40.0, sols.get(now[0], 5_000_000_000))
         feed.evaluate(coin)
         for stamp in (1030.0, 1180.0, 2065.0):
@@ -312,3 +337,33 @@ def test_fading_rate_on_the_saved_watch_does_not_buy(tmp_path: Path) -> None:
         assert not feed.pos
         assert "SOL/s" in feed.ledger.skips[-1][1]
         assert feed.ledger.fills == []
+
+
+def test_last_window_one_wallet_skips_before_a_paper_buy(tmp_path: Path) -> None:
+    path = _feed(tmp_path, [1000.0])
+    now = [1000.0]
+    # Whole tape clears the older caps. The entry window is one wallet.
+    chased = dict(_flow(16), last_window_buyers=1, last_window_top_pct=100.0, last_window_buy_sol=0.6)
+    coin = _coin(symbol="CHASE", mint="chase-mint-0001")
+    with patch.object(live_feed, "Ledger", _MemoryLedger), \
+         patch.object(live_feed, "LunarCrushClient", _NoNetworkLunar), \
+         patch.object(Feed, "restore", lambda self: setattr(self, "restored", [])), \
+         patch.object(live_feed.SIM, "append"), \
+         patch.object(live_feed.time, "time", side_effect=lambda: now[0]), \
+         patch.object(live_feed, "http", side_effect=lambda *_a, **_k: dict(coin)):
+        feed = Feed({"mode": "paper", "bankroll_usd": 10_000}, strategy_config_path=path)
+        feed.ev = lambda _message: None
+        feed.holders = lambda _coin: (1, 1, 1, 1_000_000)
+        feed.dev_pct = lambda _coin, _supply: 1
+        feed.social = lambda _symbol: None
+        feed.flow_for = lambda _coin, _since, _last=None: chased
+        _run_watch(feed, coin, now)
+        assert not feed.pos
+        assert feed.ledger.skips[-1][1].startswith("flow last window buyers")
+        assert feed.ledger.fills == []
+        started = Feed._last_window_start({
+            "t": 1000.0,
+            "watch_periods": {"medium": {"status": "observed", "elapsed_s": 180.0, "duration_s": 90}},
+        })
+        assert started == 1180.0
+        assert Feed._last_window_start({"t": 1000.0, "watch_periods": {"medium": {"status": "watching", "elapsed_s": 0}}}) is None

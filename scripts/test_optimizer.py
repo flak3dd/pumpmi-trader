@@ -352,10 +352,11 @@ class OptimizerTests(unittest.TestCase):
         self.assertIsNotNone(position)
         assert position is not None
         # Rise, then recoverable drawdown, then recovery: max must not become zero.
-        apply_observation(portfolio, position["id"], known_observation("DD", 60, 36_000))
+        # +10% spot is under the +8% net profit-lock arm, so this position stays open.
+        apply_observation(portfolio, position["id"], known_observation("DD", 60, 33_000))
         apply_observation(portfolio, position["id"], known_observation("DD", 120, 30_000))
         peak_drawdown = portfolio["max_drawdown_pct"]
-        apply_observation(portfolio, position["id"], known_observation("DD", 180, 36_000))
+        apply_observation(portfolio, position["id"], known_observation("DD", 180, 33_000))
         self.assertGreater(peak_drawdown, 0)
         self.assertEqual(portfolio["max_drawdown_pct"], peak_drawdown)
 
@@ -368,6 +369,29 @@ class OptimizerTests(unittest.TestCase):
         event = apply_observation(dev_portfolio, dev_position["id"], dev_sample)
         self.assertEqual(event and event["status"], "closed")
         self.assertIn("developer balance decreased", event["reason"] if event else "")
+
+    def test_profit_lock_banks_a_round_trip_the_hard_stop_would_give_back(self) -> None:
+        portfolio = initial_portfolio()
+        position = open_position(portfolio, known_observation("LOCK", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(position)
+        assert position is not None
+        # +20% spot is about +15.6% net after both sides of 100 bps fee + 100 bps slippage.
+        self.assertIsNone(apply_observation(portfolio, position["id"], known_observation("LOCK", 60, 36_000)))
+        # +30% spot still scales half. The lock must not flatten a print at the scale target.
+        scaled = initial_portfolio()
+        runner = open_position(scaled, known_observation("RUN", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(runner)
+        assert runner is not None
+        half = apply_observation(scaled, runner["id"], known_observation("RUN", 60, 39_000))
+        self.assertEqual(half and half["status"], "scaled")
+        self.assertIn("scale half", half["reason"] if half else "")
+
+        locked = apply_observation(portfolio, position["id"], known_observation("LOCK", 120, 33_000))
+        self.assertEqual(locked and locked["status"], "closed")
+        self.assertTrue((locked or {}).get("reason", "").startswith("profit lock"))
+        self.assertGreater(float((locked or {}).get("net") or 0), 0)
+        # The same path used to ride 30k -> 36k -> 33k -> 24k into a -20% stop, net about -30.68.
+        self.assertGreater(float(locked["net"]), -30.68)
 
     def test_chronological_split_never_divides_same_timestamp_cohort(self) -> None:
         observations: list[dict] = []

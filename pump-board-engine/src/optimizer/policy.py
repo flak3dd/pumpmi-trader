@@ -10,6 +10,8 @@ from copy import deepcopy
 import math
 from typing import Any
 
+from ..exits import profit_lock_hit
+
 
 FEE_BPS = 100
 SLIPPAGE_BPS = 100
@@ -33,6 +35,8 @@ EXIT_RULES = {
     "soft_exit_below_pct": 5.0,
     "hard_exit_seconds": 40 * 60,
     "flatten_curve_pct": 95.0,
+    "profit_lock_arm_pct": 8.0,
+    "profit_lock_giveback_pct": 6.0,
 }
 
 
@@ -49,6 +53,21 @@ def _finite_number(value: Any) -> float | None:
 def paper_cost(notional: float) -> float:
     """Model 100 bps fee + 100 bps slippage for one side, separately."""
     return round(max(0.0, notional) * SIDE_COST_RATE, 8)
+
+
+def net_of_costs_pct(entry_price: float, mark_price: float) -> float:
+    """Full-exit percent return after both sides' modeled fee and slippage.
+
+    An unchanged spot is about -4%. This is the same cost model as ``paper_cost``,
+    used so a profit lock arms on paper net rather than on a spot move the costs eat.
+    It is not a measured fill.
+    """
+    entry = float(entry_price)
+    mark = float(mark_price)
+    if entry <= 0 or mark <= 0:
+        return 0.0
+    ratio = mark / entry
+    return 100.0 * (ratio * (1.0 - SIDE_COST_RATE) - 1.0 - SIDE_COST_RATE)
 
 
 def position_size(equity: float, *, losing_streak: int = 0) -> float:
@@ -362,6 +381,14 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
         return (f"scale half {change:.1f}%", 0.5)
     if position.get("scaled") and current < float(position["peak_mcap"]) * (1.0 - EXIT_RULES["trail_giveback_pct"] / 100.0):
         return (f"trail 12% {change:.1f}%", 1.0)
+    # Scale-out is checked above. A print still short of that target can lock
+    # a real net gain instead of riding the giveback into the hard stop.
+    if not position.get("scaled") and change < EXIT_RULES["scale_out_pct"]:
+        peak = float(position.get("peak_mcap") or current)
+        net = net_of_costs_pct(entry, current)
+        peak_net = net_of_costs_pct(entry, peak)
+        if profit_lock_hit(peak_net, net, EXIT_RULES["profit_lock_arm_pct"], EXIT_RULES["profit_lock_giveback_pct"]):
+            return (f"profit lock {net:.1f}% (peak {peak_net:.1f}%)", 1.0)
     if not position.get("scaled") and age >= EXIT_RULES["soft_exit_seconds"] and change < EXIT_RULES["soft_exit_below_pct"]:
         return (f"soft 12m {change:.1f}%", 1.0)
     if age >= EXIT_RULES["hard_exit_seconds"]:

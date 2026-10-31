@@ -21,6 +21,20 @@ def net_change_pct(entry_eff: float, exit_eff: float) -> float:
     return 100.0 * (float(exit_eff) / float(entry_eff) - 1.0)
 
 
+def profit_lock_hit(peak_net: float, net: float, arm_pct: float = 8.0, giveback_pct: float = 6.0) -> bool:
+    """True when a not-yet-scaled paper gain should be closed in full.
+
+    The lock stays off until peak net reaches ``arm_pct``. The line is
+    ``max(0, peak_net - giveback)``, so the threshold itself is never a loss.
+    A later print can still gap through that line. Callers try the scale-out
+    first: a print already at the scale target is a half sale, not a full lock.
+    """
+    if float(peak_net) + 1e-9 < abs(float(arm_pct)):
+        return False
+    floor = max(0.0, float(peak_net) - abs(float(giveback_pct)))
+    return float(net) <= floor + 1e-6
+
+
 def vol_stop_pct(returns: list, strat: dict) -> float:
     """Negative percent. Sample-starved paths keep the hard stop. Otherwise clamp to [hard, floor].
 
