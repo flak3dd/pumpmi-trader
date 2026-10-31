@@ -22,6 +22,7 @@ if str(ENGINE_ROOT) not in sys.path:
     sys.path.insert(0, str(ENGINE_ROOT))
 
 from src.optimizer.policy import (  # noqa: E402
+    EXIT_RULES,
     apply_observation,
     exit_reason,
     initial_portfolio,
@@ -542,6 +543,35 @@ class OptimizerTests(unittest.TestCase):
         self.assertIn("stop loss", stopped["reason"] if stopped else "")
         self.assertAlmostEqual(float(stopped["net"]) if stopped else 0, -20.488, places=2)
         self.assertGreater(float(stopped["net"]) if stopped else 0, -30.68)
+
+    def test_failed_impulse_leaves_before_the_net_stop_unless_spot_bounced(self) -> None:
+        """−8% spot is about −11.8% net. The hard stop still waits for about −15.8% net.
+
+        A never-green path used to stay open until 26.4k and book about −20.49.
+        The same print now closes, and that loss is smaller. A +3% spot bounce
+        keeps the hard stop. Neither figure is a measured live profit.
+        """
+        portfolio = initial_portfolio()
+        position = open_position(portfolio, known_observation("IMP", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(position)
+        assert position is not None
+        early = known_observation("IMP", 60, 27_600)
+        self.assertAlmostEqual(100.0 * (27_600 / 30_000 - 1.0), -8.0, places=6)
+        self.assertGreater(net_of_costs_pct(30_000, 27_600), EXIT_RULES["stop_loss_pct"])
+        closed = apply_observation(portfolio, position["id"], early)
+        self.assertEqual(closed and closed["status"], "closed")
+        self.assertTrue((closed or {}).get("reason", "").startswith("failed impulse"))
+        impulse_net = float(closed["net"]) if closed else 0.0
+        self.assertAlmostEqual(impulse_net, -15.392, places=2)
+        self.assertGreater(impulse_net, -20.488)
+
+        bounced = initial_portfolio()
+        runner = open_position(bounced, known_observation("BNC", 0, 30_000), strategy_revision=1)
+        self.assertIsNotNone(runner)
+        assert runner is not None
+        self.assertIsNone(apply_observation(bounced, runner["id"], known_observation("BNC", 30, 30_900)))
+        self.assertIsNone(apply_observation(bounced, runner["id"], known_observation("BNC", 60, 27_600)))
+        self.assertIn(runner["id"], bounced["positions"])
 
         soft_book = initial_portfolio()
         soft_position = open_position(soft_book, known_observation("SOFT", 0, 30_000), strategy_revision=1)

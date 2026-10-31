@@ -11,7 +11,7 @@ import math
 from typing import Any
 
 from ..curve import flat_round_trip_pct, size_for_curve_depth, sol_price_usd
-from ..exits import profit_lock_hit
+from ..exits import failed_impulse_hit, profit_lock_hit
 
 
 FEE_BPS = 100
@@ -48,6 +48,10 @@ EXIT_RULES = {
     "flatten_curve_pct": 95.0,
     "profit_lock_arm_pct": 8.0,
     "profit_lock_giveback_pct": 6.0,
+    # Spot, not net. A never-green print here is already about −12% after both
+    # sides of the flat fee model, short of the −15% net hard stop.
+    "fail_impulse_drop_pct": 8.0,
+    "fail_impulse_max_peak_pct": 2.0,
 }
 
 
@@ -485,6 +489,8 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
     A -15% spot print is about -18.7% after 100 bps fee + 100 bps slippage, so a
     gross stop waited through prints that were already a -15% paper loss. The
     same net is what the profit lock uses. The post-scale trail stays on spot.
+    A position that never printed +2% spot leaves at −8% spot instead of waiting
+    for that net stop. A bounce keeps the hard stop.
     """
     current = float(observation["market_cap"])
     entry = float(position["entry_mcap"])
@@ -503,6 +509,11 @@ def exit_reason(position: dict[str, Any], observation: dict[str, Any]) -> tuple[
         curve = _finite_number(observation.get("curve_pct"))
         if curve is not None and curve >= EXIT_RULES["flatten_curve_pct"]:
             return (f"flatten curve {curve:.1f}%", 1.0)
+    if not position.get("scaled") and failed_impulse_hit(
+        entry, current, position.get("peak_mcap"),
+        EXIT_RULES["fail_impulse_drop_pct"], EXIT_RULES["fail_impulse_max_peak_pct"],
+    ):
+        return (f"failed impulse {change:.1f}%", 1.0)
     if not position.get("scaled") and net >= EXIT_RULES["scale_out_pct"]:
         return (f"scale half {net:.1f}%", 0.5)
     if position.get("scaled") and current < float(position["peak_mcap"]) * (1.0 - EXIT_RULES["trail_giveback_pct"] / 100.0):

@@ -35,6 +35,38 @@ def profit_lock_hit(peak_net: float, net: float, arm_pct: float = 8.0, giveback_
     return float(net) <= floor + 1e-6
 
 
+def failed_impulse_hit(
+    entry_spot: float | None,
+    spot: float | None,
+    peak_spot: float | None,
+    drop_pct: float = 8.0,
+    max_peak_pct: float = 2.0,
+) -> bool:
+    """True when spot fell ``drop_pct`` from entry and never printed a real bounce.
+
+    High realized vol widens the volatility band out to the hard stop, so a
+    position that never cleared ``max_peak_pct`` can sit from this print until
+    the −15% net stop. The quiet −4% spot band still handles low-vol paths.
+    A peak at or above ``max_peak_pct`` belongs to the profit lock and the hard
+    stop, not this exit. This is a paper mark, not an order.
+    """
+    try:
+        entry = float(entry_spot) if entry_spot is not None else 0.0
+        mark = float(spot) if spot is not None else 0.0
+        peak = float(peak_spot) if peak_spot is not None else mark
+        drop = abs(float(drop_pct))
+        ceiling = abs(float(max_peak_pct))
+    except (TypeError, ValueError):
+        return False
+    if entry <= 0 or mark <= 0 or peak <= 0 or drop >= 100:
+        return False
+    peak_change = (peak / entry - 1.0) * 100.0
+    if peak_change + 1e-9 >= ceiling:
+        return False
+    change = (mark / entry - 1.0) * 100.0
+    return change <= -drop + 1e-6
+
+
 def vol_stop_hit(entry_spot: float | None, spot: float | None, band: float, hard: float) -> bool:
     """True when spot itself has reached a band that is tighter than the hard stop.
 
