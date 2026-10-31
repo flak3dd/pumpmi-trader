@@ -32,7 +32,7 @@ The read-only review's three concrete frontend findings are corrected: stale loa
 - [x] Validate bounded neighboring watch-duration candidates chronologically on separate training/holdout data, with explicit modeled execution costs, minimum 30 completed holdout trades, positive net expectancy, profit factor above 1.1, champion-relative improvement, and drawdown limits before any automatic promotion. Retain risk caps and record waiting-for-evidence states when data is insufficient.
 - [x] Surface live-source freshness/errors, champion settings, net/gross P&L and cost assumptions, half-hour results, drawdown, trade counts, last/next reviews, validation decisions, and rollback history in the existing terminal.
 - [ ] Verify software, source readiness, durable deployment, and actual worker health; distinguish configured/published/running/waiting-for-data states. Enable the approved paid hosting through the product confirmation and publish the accepted version.
-- [ ] Push the completed intended source changes to the user's existing GitHub repository branch without force, preserving any independent edits and using authorized credentials.
+- [x] Push the completed intended source changes to the user's existing GitHub repository branch without force, preserving any independent edits and using authorized credentials.
 
 ### GitHub source delivery
 
@@ -59,3 +59,5 @@ The read-only review's confirmed defects are fixed: an hour cannot be called com
 Real-data operation was verified in the current Preview runtime: 49 public pump.fun observations across 32 tracked tokens, with a durable worker lease and the user's unchanged revision-7 watch settings (30/180/1065 seconds). There are zero open and zero completed paper trades so far. Holder RPC reads are rate-limited on the default public service; the independently documented PublicNode endpoint denied holder reads. Unknown risk remains entry-blocking. Configure a reliable protected `SOLANA_RPC_URL` before expecting risk-approved entries. No positive-profit result or always-on deployment is claimed from this readiness run.
 
 Hourly report code is integrated into the active worker and preserves its database session across restarts, but a full real hour has not completed yet. Reserved hosting confirmation/publication and the rejected ten-minute agent schedule remain unresolved rather than falsely marked active.
+
+The tested live-market paper optimizer source was pushed successfully to GitHub `main`, commit `4842ccd`, on 2026-10-31 at 19:06 AEDT. The managed website has not been published, and neither paid always-on hosting nor the ten-minute schedule is confirmed active.

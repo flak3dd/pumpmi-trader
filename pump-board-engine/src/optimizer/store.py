@@ -7,6 +7,7 @@ ledger, fixture, or strategy files after the optional one-time seed input.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import ssl
@@ -54,6 +55,7 @@ class DatabaseStore:
     """A narrow DB-API adapter with additive migrations and JSON state records."""
 
     def __init__(self, database_url: str | None = None, *, connection: Any = None) -> None:
+        self._state_cache: dict[str, tuple[float, Any]] = {}
         if connection is not None:
             self.dialect = "sqlite"
             self._connection = connection
@@ -274,9 +276,16 @@ class DatabaseStore:
         return document
 
     def get_state(self, key: str, default: Any = None) -> Any:
-        with self.transaction() as cur:
-            row = self._execute(cur, "SELECT value_json FROM optimizer_state WHERE namespace=? AND state_key=?", (FORWARD_NAMESPACE, key)).fetchone()
-        return default if row is None else _loads(row["value_json"], default)
+        with self._lock:
+            cached = self._state_cache.get(key) if self.dialect == "mysql" else None
+            if cached is not None and time.monotonic() - cached[0] < 5:
+                return copy.deepcopy(cached[1])
+            with self.transaction() as cur:
+                row = self._execute(cur, "SELECT value_json FROM optimizer_state WHERE namespace=? AND state_key=?", (FORWARD_NAMESPACE, key)).fetchone()
+            value = default if row is None else _loads(row["value_json"], default)
+            if self.dialect == "mysql" and row is not None:
+                self._state_cache[key] = (time.monotonic(), copy.deepcopy(value))
+            return copy.deepcopy(value)
 
     def set_state(self, key: str, value: Any, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -288,6 +297,10 @@ class DatabaseStore:
             else:
                 self._execute(cur, """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
                     VALUES (?, ?, ?, ?) ON CONFLICT(namespace, state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at""", (FORWARD_NAMESPACE, key, encoded, now))
+
+        if self.dialect == "mysql":
+            with self._lock:
+                self._state_cache[key] = (time.monotonic(), copy.deepcopy(value))
 
     def set_many_state(self, values: dict[str, Any], *, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -301,6 +314,12 @@ class DatabaseStore:
                     statement = """INSERT INTO optimizer_state(namespace, state_key, value_json, updated_at)
                         VALUES (?, ?, ?, ?) ON CONFLICT(namespace, state_key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at"""
                 self._execute(cur, statement, (FORWARD_NAMESPACE, key, encoded, now))
+
+        if self.dialect == "mysql":
+            with self._lock:
+                stamp = time.monotonic()
+                for key, value in values.items():
+                    self._state_cache[key] = (stamp, copy.deepcopy(value))
 
     def acquire_lease(self, lease_name: str, holder: str, *, ttl_seconds: float, now: float | None = None) -> bool:
         """Acquire/renew one worker lease atomically; stale deployments can recover."""

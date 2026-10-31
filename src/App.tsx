@@ -977,7 +977,10 @@ export default function App() {
   useEffect(() => {
     if (paused || snapshot?.meta.kind === "fixture") return;
     let active = true;
+    let pending = false;
     const interval = setInterval(() => {
+      if (pending) return;
+      pending = true;
       loadSnapshot()
         .then((next) => {
           if (!active) return;
@@ -989,6 +992,9 @@ export default function App() {
         .catch(() => {
           if (active)
             setError("Snapshot monitoring interrupted. Refresh to reconnect.");
+        })
+        .finally(() => {
+          pending = false;
         });
     }, 15000);
     return () => {
