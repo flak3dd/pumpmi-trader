@@ -1,12 +1,15 @@
 """Continuous PAPER feed on public market data. Never signs and never sends.
 
 v8 expected-edge revision (not a profitability claim):
-  H1 swap tape from curve SOL deltas — buyers, net SOL, top-buyer share; missing tape skips.
+  H1 swap tape from curve SOL deltas — buyers, net SOL, top-buyer share. A present tape still has to pass.
+     A missing tape does not consult replies: zero and absent counts are unavailable, so only a curve
+     rise of at least flow_fallback_rise_pts can clear P2. A smaller rise still skips. The 70–85% band still needs the tape.
   H2 position checks every ~2.5s before coin scans; parallel marks; 10% one-check emergency exit.
   H3 paper fills include the fee and, when reserves are known, bonding-curve impact.
   M1 each watch window's SOL per second must rise; a longer window is not acceleration. Material post-entry SOL outflow exits.
   M2 curve band 30–70%, or 70–85% only with stronger buyer breadth. Above 85% skips.
-  M3 volatility can tighten the stop but not past -15%; +15% net arms fee-inclusive break-even.
+  M3 volatility can tighten the stop on the spot move, not the fee-inclusive net, and not past -15%. +15% net arms fee-inclusive break-even.
+  H4 top-10 and top-5 drop the known curve token account. The largest balance is not treated as the curve, so a whale that outsizes it still counts. A missing curve account skips.
   M4 similarity boost needs >=30 prior exits, is capped at 1.5x, and ignores future rows.
   L1 missing holder/dev/cluster reads skip. L2 curve progress is reserve-based.
   L3 signal strength sizes inside the $130–160 band (loss-streak halving still applies after).
@@ -16,7 +19,9 @@ v8 expected-edge revision (not a profitability claim):
   L5 the last watch window needs 3 buyers and no wallet above 50% of that window's buy SOL.
   L6 that same window must itself clear the 1.3 buy/sell ratio. A net bid sizes slightly larger inside $130–160.
   L7 same-wallet round trip above 50% of buy SOL skips. Sells from other wallets do not count. A cleaner tape sizes slightly larger inside $130–160.
+  L8 last-window sells of at least 0.15 SOL cannot be one wallet above 60%. The seller does not have to have bought. A spread-out offer sizes slightly larger inside $130–160.
   M5 once net peaks at +8%, a 6-point giveback exits before the +25% scale. The scale still comes first.
+  M8 a position that never printed +2% spot exits once spot is −8%. A widened vol band no longer holds that path to the −15% net stop. A bounce of +2% spot keeps the hard stop.
   M6 a flat round trip worse than -10% at the intended size skips. The curve is priced with the SOL quote, or the price implied by reserves when the quote is missing.
   M7 after that skip, size above the $130 floor is cut until a flat round trip is no worse than -4%. A deep book keeps the signal size, including a similarity boost.
 """
@@ -35,12 +40,14 @@ from .aggregators.fuse import fuse, PLATFORMS
 from .ledger import Ledger
 from . import similarity as SIM
 from .kanban_state import Board
+from .holders import concentration, curve_token_accounts, largest_account_rows
 from .curve import parse_curve_account, buy_fill, sell_eff, flat_round_trip_pct, size_for_curve_depth, sol_price_usd
 from .flow import (
     summarize, trade_from_tx, flow_allows, accelerating, flow_reversed,
     signal_strength, size_for_signal, with_last_window, last_window_allows,
+    unavailable_tape_fallback,
 )
-from .exits import emergency_drop, net_change_pct, vol_stop_pct, profit_lock_hit
+from .exits import emergency_drop, failed_impulse_hit, net_change_pct, vol_stop_hit, vol_stop_pct, profit_lock_hit
 
 PF = "https://frontend-api-v3.pump.fun"
 RPC = "https://api.mainnet-beta.solana.com"
@@ -54,12 +61,14 @@ STRAT = dict(
     flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
     flow_last_window_min_buyers=3, flow_last_window_max_whale_pct=50, flow_last_window_min_bs_ratio=1.3,
-    flow_max_round_trip_pct=50, impact_max_drag_pct=-10, impact_size_budget_pct=-4,
+    flow_last_window_max_seller_pct=60, flow_last_window_min_sell_sol=0.15,
+    flow_max_round_trip_pct=50, flow_fallback_rise_pts=3, impact_max_drag_pct=-10, impact_size_budget_pct=-4,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,
     stop_loss_pct=-15, vol_stop_floor_pct=4, vol_stop_mult=2, vol_stop_min_samples=4, be_arm_pct=15,
     profit_lock_arm_pct=8, profit_lock_giveback_pct=6,
+    fail_impulse_drop_pct=8, fail_impulse_max_peak_pct=2,
     scale_out_pct=25, trail_giveback_pct=12, flat_exit_s=720, flat_exit_below_pct=5,
     hard_exit_s=2400, flatten_curve_pct=95,
     v6_size_mult=1.5, v6_trail_relax=1.20, v6_min_hist=30, v7_boost_eq_pct=8, v7_boost_usd_max=500,
@@ -370,13 +379,20 @@ class Feed:
         return with_last_window(summary, trades, last_window_ts)
 
     def holders(self, coin):
+        """Top-1 / top-5 / top-10 percents with the known curve token account removed.
+
+        A missing curve address, or a curve address that is not in the largest
+        accounts, is unavailable. The previous code dropped whichever balance
+        was largest and could therefore delete the whale and keep the curve.
+        """
         try:
             payload = self._rpc("getTokenLargestAccounts", [coin["mint"], {"commitment": "confirmed"}])
-            accounts = [float(account["uiAmount"] or 0) for account in payload["result"]["value"]]
-            supply = float(coin.get("total_supply") or 1e15) / 10 ** int(coin.get("base_decimals", 6))
-            rest = sorted(accounts, reverse=True)[1:]
-            top10 = round(100 * sum(rest[:10]) / supply, 1)
-            return (round(100 * rest[0] / supply, 1) if rest else 0), round(100 * sum(rest[:5]) / supply, 1), top10, supply
+            parsed = largest_account_rows((payload.get("result") or {}).get("value"))
+            supply = float(coin.get("total_supply") or 0) / 10 ** int(coin.get("base_decimals", 6))
+            stats = concentration(parsed or [], supply, curve_token_accounts(coin))
+            if stats is None or supply <= 0:
+                return None, None, None, None
+            return (*stats, supply)
         except Exception:
             return None, None, None, None
 
@@ -488,15 +504,27 @@ class Feed:
         )
         if not accel_ok:
             return self.skip(key, accel_why, False, coin)
+        rise_pts = curve - watch["curve"]
         flow = self.flow_for(coin, watch["t"], self._last_window_start(watch))
         if flow is None:
-            return self.skip(key, "flow unavailable", False, coin)
-        flow_ok, flow_why = flow_allows(flow, rules, strong=strong)
-        if not flow_ok:
-            return self.skip(key, flow_why, False, coin)
-        late_ok, late_why = last_window_allows(flow, rules)
-        if not late_ok:
-            return self.skip(key, late_why, False, coin)
+            # 70–85% still needs the tape's stronger buyer breadth. Replies cannot stand in for it.
+            if strong:
+                return self.skip(key, "flow unavailable: upper curve band needs buyer breadth", False, coin)
+            flow_ok, flow_why = unavailable_tape_fallback(
+                coin.get("reply_count"), rise_pts, rules["flow_fallback_rise_pts"],
+            )
+            if not flow_ok:
+                return self.skip(key, flow_why, False, coin)
+            late_why = "flow last window n/a (tape missing)"
+            strength = 0.0
+        else:
+            flow_ok, flow_why = flow_allows(flow, rules, strong=strong)
+            if not flow_ok:
+                return self.skip(key, flow_why, False, coin)
+            late_ok, late_why = last_window_allows(flow, rules)
+            if not late_ok:
+                return self.skip(key, late_why, False, coin)
+            strength = signal_strength(flow, slices, rules, strong=strong, durations=durations)
         snap = self.social(symbol)
         half = False
         if snap == "RATE":
@@ -511,7 +539,6 @@ class Feed:
         self.watch.pop(mint, None)
         if len(self.pos) >= rules["max_open"]:
             return self.skip(key, f"max {rules['max_open']} open", False, coin)
-        strength = signal_strength(flow, slices, rules, strong=strong, durations=durations)
         usd = size_for_signal(strength, rules)
         if self.loss_streak >= rules["loss_streak_halve"]:
             usd /= 2
@@ -530,17 +557,26 @@ class Feed:
         sol_px = (mcap / quote) if mcap and quote else 0.0
         if sol_px <= 0:
             sol_px = sol_price_usd(mcap, state.get("virtual_sol"), state.get("virtual_token")) or 0.0
+        if flow:
+            flow_fields = dict(
+                flow_buyers=flow["unique_buyers"], flow_signed_sol=round(flow["signed_quote_sol"], 4),
+                flow_top_buyer_pct=round(flow["top_buyer_pct"], 2),
+                flow_top3_buyer_pct=round(float(flow["top3_buyer_pct"]), 2),
+                flow_meaningful_buyers=int(flow["meaningful_buyers"]),
+            )
+        else:
+            # Unmeasured tape stays null so a fallback entry is not recorded as zero buyers.
+            flow_fields = dict(
+                flow_buyers=None, flow_signed_sol=None, flow_top_buyer_pct=None,
+                flow_top3_buyer_pct=None, flow_meaningful_buyers=None,
+            )
         feat = dict(
             key=key, mint=mint, curve_pct=curve, mcap=round(mcap), replies=replies, top10_pct=top10,
-            dev_pct=dev, bundle_pct=bundle, rise_pts=round(curve - watch["curve"], 2),
+            dev_pct=dev, bundle_pct=bundle, rise_pts=round(rise_pts, 2),
             sentiment_0_100=social_values.get("sentiment_0_100") if sentiment_buy else None,
             mention_volume=social_values.get("mention_volume") if sentiment_buy else None,
             sentiment_buy=sentiment_buy, age_s=round(time.time() - created / 1000) if created else None,
-            flow_buyers=flow["unique_buyers"], flow_signed_sol=round(flow["signed_quote_sol"], 4),
-            flow_top_buyer_pct=round(flow["top_buyer_pct"], 2),
-            flow_top3_buyer_pct=round(float(flow["top3_buyer_pct"]), 2),
-            flow_meaningful_buyers=int(flow["meaningful_buyers"]),
-            signal_strength=round(strength, 3),
+            signal_strength=round(strength, 3), **flow_fields,
         )
         boost = False
         trail = rules["trail_giveback_pct"]
@@ -752,8 +788,27 @@ class Feed:
             self._scale_or_time(key, position, spot, net, exit_price, age, rules)
         else:
             band = vol_stop_pct(position.get("rets") or [], rules)
-            if band > rules["stop_loss_pct"] and net <= band:
-                self.close(key, spot, f"vol stop {net:.0f}% (band {band:.0f}%)", exit_eff=exit_price)
+            entry_spot = position.get("entry_spot") or position.get("entry")
+            if vol_stop_hit(entry_spot, spot, band, rules["stop_loss_pct"]):
+                spot_change = net_change_pct(entry_spot, spot)
+                self.close(
+                    key, spot,
+                    f"vol stop {net:.0f}% (spot {spot_change:.0f}%, band {band:.0f}%)",
+                    exit_eff=exit_price,
+                )
+            elif not position.get("scaled") and failed_impulse_hit(
+                entry_spot, spot, position.get("peak"),
+                rules["fail_impulse_drop_pct"], rules["fail_impulse_max_peak_pct"],
+            ):
+                # Quiet tapes already left through the −4% spot band above. This is the
+                # widened-band path: spot is down and the trade never bounced.
+                spot_change = net_change_pct(entry_spot, spot)
+                peak_change = net_change_pct(entry_spot, position.get("peak") or spot)
+                self.close(
+                    key, spot,
+                    f"failed impulse spot {spot_change:.0f}% (peak {peak_change:.0f}%)",
+                    exit_eff=exit_price,
+                )
             else:
                 self._scale_or_time(key, position, spot, net, exit_price, age, rules)
 

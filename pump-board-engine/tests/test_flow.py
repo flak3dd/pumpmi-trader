@@ -5,6 +5,7 @@ from src.flow import (
     accelerating,
     flow_allows,
     flow_reversed,
+    unavailable_tape_fallback,
     last_window_allows,
     signal_strength,
     size_for_signal,
@@ -44,6 +45,30 @@ def test_sell_and_dust_are_classified():
 def test_summary_and_gate_never_passes_when_missing():
     ok, reason = flow_allows(None, STRAT)
     assert not ok and reason == "flow unavailable"
+
+
+def test_unavailable_replies_use_curve_rise_only_when_the_tape_is_missing():
+    """Zero or absent replies are unknown. The rise alone can clear the fallback.
+
+    A present tape still fails closed in ``flow_allows``. A flat curve still
+    skips, including when a real reply count is present. Replies never replace
+    the tape by themselves.
+    """
+    need = STRAT["flow_fallback_rise_pts"]
+    assert need == 3
+    ok, reason = unavailable_tape_fallback(0, 6.0, need)
+    assert ok and reason == "flow n/a -> fallback (replies unavailable, curve +6.0pts)"
+    ok, reason = unavailable_tape_fallback(None, need, need)
+    assert ok and "replies unavailable" in reason
+    ok, reason = unavailable_tape_fallback("n/a", 4.0, need)
+    assert ok and "replies unavailable" in reason
+    ok, reason = unavailable_tape_fallback(0, 2.9, need)
+    assert not ok and reason == "flow n/a -> fallback (replies unavailable, curve +2.9pts < 3)"
+    ok, reason = unavailable_tape_fallback(40, 0.0, need)
+    assert not ok and reason == "flow n/a -> fallback (replies 40 ignored, curve +0.0pts < 3)"
+    ok, reason = unavailable_tape_fallback(40, 3.0, need)
+    assert ok and "replies 40 ignored" in reason
+    assert flow_allows(None, STRAT) == (False, "flow unavailable")
     empty = summarize([])
     ok, reason = flow_allows(empty, STRAT)
     assert not ok and "buyers" in reason
@@ -231,10 +256,12 @@ def test_broader_last_window_sizes_larger_without_leaving_the_band():
     broad = dict(
         base, last_window_buyers=9, last_window_top_pct=15, last_window_buy_sol=1.2,
         last_window_signed_sol=1.0, last_window_imbalance=2.6, last_window_round_trip_pct=0.0,
+        last_window_sell_sol=0.4, last_window_top_seller_pct=20.0,
     )
     thin = dict(
         base, last_window_buyers=3, last_window_top_pct=49, last_window_buy_sol=0.4,
         last_window_signed_sol=0.3, last_window_imbalance=1.4, last_window_round_trip_pct=0.0,
+        last_window_sell_sol=0.4, last_window_top_seller_pct=20.0,
     )
     assert last_window_allows(broad, STRAT)[0]
     assert last_window_allows(thin, STRAT)[0]
@@ -283,7 +310,7 @@ def test_last_window_net_sell_skips_a_tape_the_breadth_caps_allow():
     late = [{"side": "buy", "quote_sol": 0.2, "user": f"b{i}", "ts": 250} for i in range(4)]
     healthy = with_last_window(summarize(bids + late), bids + late, 200)
     assert last_window_allows(healthy, STRAT)[0]
-    disabled = {**STRAT, "flow_last_window_min_bs_ratio": 0}
+    disabled = {**STRAT, "flow_last_window_min_bs_ratio": 0, "flow_last_window_max_seller_pct": 100}
     assert last_window_allows(summary, disabled)[0]
     assert last_window_allows(dict(healthy, last_window_signed_sol=None, last_window_imbalance=None), STRAT)[1] == (
         "flow last window imbalance unavailable"
@@ -304,7 +331,7 @@ def test_stronger_last_window_bid_sizes_larger_without_leaving_the_band():
         unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
         meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
         last_window_buyers=6, last_window_top_pct=20, last_window_buy_sol=0.8,
-        last_window_round_trip_pct=0.0,
+        last_window_round_trip_pct=0.0, last_window_sell_sol=0.4, last_window_top_seller_pct=20.0,
     )
     weak = dict(base, last_window_signed_sol=0.2, last_window_imbalance=1.3)
     strong = dict(base, last_window_signed_sol=0.8, last_window_imbalance=2.6)
@@ -370,3 +397,51 @@ def test_same_wallet_round_trip_skips_a_tape_the_imbalance_cap_allows():
     filled = buy_fill(spot, usd, sol_px, virtual_sol, virtual_token, STRAT["curve_fee_bps"])
     flat = sell_eff(spot, filled["tokens"], virtual_sol, virtual_token, STRAT["curve_fee_bps"])
     assert usd * flat / filled["entry_eff"] - usd < 0
+
+
+def _bid_into_one_seller():
+    """Whole tape and the entry window clear the older caps. One wallet is the offer."""
+    early = [{"side": "buy", "quote_sol": 0.30, "user": f"u{i}", "ts": 100} for i in range(16)]
+    early.append({"side": "sell", "quote_sol": 0.40, "user": "early-seller", "ts": 110})
+    late = [{"side": "buy", "quote_sol": 0.25, "user": f"b{i}", "ts": 250} for i in range(4)]
+    late.append({"side": "sell", "quote_sol": 0.70, "user": "dumper", "ts": 260})
+    return with_last_window(summarize(early + late), early + late, 200)
+
+
+def test_last_window_one_seller_skips_a_bid_the_buyer_caps_allow():
+    """The seller never bought. Round trip is zero and the bid still clears 1.3."""
+    summary = _bid_into_one_seller()
+    assert flow_allows(summary, STRAT)[0]
+    assert summary["round_trip_pct"] == 0
+    assert summary["last_window_round_trip_pct"] == 0
+    assert summary["last_window_imbalance"] >= STRAT["flow_last_window_min_bs_ratio"]
+    assert summary["last_window_buyers"] >= STRAT["flow_last_window_min_buyers"]
+    assert summary["last_window_top_pct"] <= STRAT["flow_last_window_max_whale_pct"]
+    assert summary["last_window_top_seller_pct"] == 100
+    assert summary["last_window_sell_sol"] >= STRAT["flow_last_window_min_sell_sol"]
+    rejected, why = last_window_allows(summary, STRAT)
+    assert not rejected and why.startswith("flow last window top seller")
+    spread = [{"side": "sell", "quote_sol": 0.175, "user": f"s{i}", "ts": 260} for i in range(4)]
+    early = [{"side": "buy", "quote_sol": 0.30, "user": f"u{i}", "ts": 100} for i in range(16)]
+    late = [{"side": "buy", "quote_sol": 0.25, "user": f"b{i}", "ts": 250} for i in range(4)]
+    distributed = with_last_window(summarize(early + late + spread), early + late + spread, 200)
+    assert distributed["last_window_top_seller_pct"] < STRAT["flow_last_window_max_seller_pct"]
+    assert last_window_allows(distributed, STRAT)[0]
+    dust = dict(summary, last_window_sell_sol=0.10, last_window_top_seller_pct=100.0)
+    assert last_window_allows(dust, STRAT)[0]
+    disabled = {**STRAT, "flow_last_window_max_seller_pct": 100}
+    assert last_window_allows(summary, disabled)[0]
+    assert last_window_allows(dict(distributed, last_window_sell_sol=None, last_window_top_seller_pct=None), STRAT)[1] == (
+        "flow last window seller unavailable"
+    )
+    high = signal_strength(distributed, [0.2, 0.4, 0.7], STRAT)
+    low = signal_strength(dict(distributed, last_window_top_seller_pct=55.0), [0.2, 0.4, 0.7], STRAT)
+    assert high > low
+    assert STRAT["size_min"] <= size_for_signal(low, STRAT) <= size_for_signal(high, STRAT) <= STRAT["size_max"]
+    # $130 flat round trip on the feed's test curve. Taking the tape pays this; skipping pays 0.
+    spot, usd, sol_px = 30_000.0, STRAT["size_min"], 150.0
+    virtual_sol, virtual_token = 40_000_000_000, 1_000_000_000_000_000
+    filled = buy_fill(spot, usd, sol_px, virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+    flat = sell_eff(spot, filled["tokens"], virtual_sol, virtual_token, STRAT["curve_fee_bps"])
+    assert usd * flat / filled["entry_eff"] - usd < 0
+    assert usd * -0.15 == -19.5
