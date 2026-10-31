@@ -109,6 +109,24 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
         feed.holders = lambda _coin: (0, 0, 0, 1_000_000)
         feed.dev_pct = lambda _coin, _supply: 0
         feed.social = lambda _symbol: None
+        # Reserve progress stays inside the 30–70 band. SOL rises at each checkpoint
+        # so the acceleration gate can pass and this test still observes the buy.
+        sols = {1000.0: 5_000_000_000, 1090.0: 5_300_000_000, 1180.0: 5_700_000_000, 1300.0: 6_200_000_000}
+
+        def curve_state(_coin):
+            return {
+                "curve_pct": 40.0,
+                "virtual_sol": 40_000_000_000,
+                "virtual_token": 1_000_000_000_000_000,
+                "real_token": 500_000_000_000_000,
+                "real_sol": sols.get(now[0], 5_000_000_000),
+            }
+
+        feed.curve_state = curve_state
+        feed.flow_for = lambda _coin, _since: {
+            "signed_quote_sol": 1.2, "buy_sol": 2.0, "sell_sol": 0.8, "imbalance": 2.5,
+            "unique_buyers": 16, "top_buyer_pct": 10.0, "trades": 20,
+        }
 
         feed.evaluate(coin)
         watch = feed.watch[coin["mint"]]
@@ -131,6 +149,7 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
             "elapsed_s": 90.0,
             "status": "observed",
             "curve_delta": 0.0,
+            "real_sol": 5_300_000_000,
         }
         assert watch["watch_periods"]["medium"]["status"] == "watching"
         assert not feed.pos and not feed.ledger.fills
@@ -148,6 +167,9 @@ def test_feed_records_actual_three_tier_observations_before_buy_and_keeps_initia
         assert watch["watch_periods"]["long"]["elapsed_s"] == 300.0
         assert len(feed.pos) == 1
         assert len(feed.ledger.fills) == 1
+        position = next(iter(feed.pos.values()))
+        assert position["entry_eff"] > position["entry_spot"]
+        assert live_feed.STRAT["size_min"] <= position["usd"] <= live_feed.STRAT["size_max"]
 
     assert _digest_tree(production_ledger) == before_ledger
 
