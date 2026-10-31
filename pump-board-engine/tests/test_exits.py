@@ -1,4 +1,4 @@
-from src.exits import emergency_drop, vol_stop_pct
+from src.exits import emergency_drop, profit_lock_hit, vol_stop_pct
 from src.live_feed import STRAT
 
 
@@ -8,6 +8,17 @@ def test_emergency_drop_is_one_check_and_ten_percent():
     assert not emergency_drop(100, 91, 10)
     assert not emergency_drop(None, 50, 10)
     assert not emergency_drop(0, 50, 10)
+
+
+def test_profit_lock_arms_only_after_a_real_gain_and_stays_non_negative():
+    assert not profit_lock_hit(7.9, 1.0, 8, 6)
+    assert not profit_lock_hit(8.0, 8.0, 8, 6)
+    assert profit_lock_hit(8.0, 2.0, 8, 6)
+    assert profit_lock_hit(14.0, 8.0, 8, 6)
+    assert not profit_lock_hit(14.0, 8.1, 8, 6)
+    # A wide giveback cannot place the line itself below zero.
+    assert profit_lock_hit(9.0, 0.0, 8, 20)
+    assert not profit_lock_hit(9.0, 0.1, 8, 20)
 
 
 def test_vol_stop_tightens_but_never_widens_past_the_hard_stop():

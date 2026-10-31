@@ -2,10 +2,12 @@ from src.flow import (
     accelerating,
     flow_allows,
     flow_reversed,
+    last_window_allows,
     signal_strength,
     size_for_signal,
     summarize,
     trade_from_tx,
+    with_last_window,
 )
 from src.live_feed import STRAT
 
@@ -190,6 +192,44 @@ def test_cleaner_distribution_sizes_larger_without_leaving_the_band():
     unmeasured.pop("top3_buyer_pct")
     unmeasured.pop("meaningful_buyers")
     assert signal_strength(unmeasured, slices, STRAT) < high
+
+
+def test_last_window_rejects_one_wallet_the_whole_tape_caps_allow():
+    """Sixteen early buyers clear the tape. One wallet then buys the entry window."""
+    early = [{"side": "buy", "quote_sol": 0.2, "user": f"u{i}", "ts": 100} for i in range(16)]
+    early.append({"side": "sell", "quote_sol": 0.4, "user": "s", "ts": 110})
+    late = [{"side": "buy", "quote_sol": 0.6, "user": "chaser", "ts": 250}]
+    summary = with_last_window(summarize(early + late), early + late, 200)
+    assert flow_allows(summary, STRAT)[0]
+    assert summary["top_buyer_pct"] <= STRAT["flow_max_whale_pct"]
+    assert summary["last_window_buyers"] == 1
+    assert summary["last_window_top_pct"] == 100
+    rejected, why = last_window_allows(summary, STRAT)
+    assert not rejected and why.startswith("flow last window buyers")
+    whale_window = dict(summary, last_window_buyers=4, last_window_top_pct=80, last_window_buy_sol=1.0)
+    rejected, why = last_window_allows(whale_window, STRAT)
+    assert not rejected and "top buyer" in why
+    loose = {**STRAT, "flow_last_window_min_buyers": 0, "flow_last_window_max_whale_pct": 100}
+    assert last_window_allows(summary, loose)[0]
+    assert last_window_allows({}, STRAT)[1] == "flow last window unavailable"
+    undated = with_last_window(summarize(early + late), early + late, None)
+    assert last_window_allows(undated, STRAT)[1] == "flow last window unavailable"
+
+
+def test_broader_last_window_sizes_larger_without_leaving_the_band():
+    slices = [0.2, 0.4, 0.7]
+    base = dict(
+        unique_buyers=24, imbalance=2.5, top_buyer_pct=8, top3_buyer_pct=18,
+        meaningful_buyers=20, buy_sol=2.4, sell_sol=1.0, signed_quote_sol=1.4, trades=24,
+    )
+    broad = dict(base, last_window_buyers=9, last_window_top_pct=15, last_window_buy_sol=1.2)
+    thin = dict(base, last_window_buyers=3, last_window_top_pct=49, last_window_buy_sol=0.4)
+    assert last_window_allows(broad, STRAT)[0]
+    assert last_window_allows(thin, STRAT)[0]
+    high = signal_strength(broad, slices, STRAT)
+    low = signal_strength(thin, slices, STRAT)
+    assert high > low
+    assert STRAT["size_min"] <= size_for_signal(low, STRAT) <= size_for_signal(high, STRAT) <= STRAT["size_max"]
 
 
 def test_longer_window_does_not_take_the_acceleration_size_credit():
