@@ -62,7 +62,7 @@ Costs explicitly assume **1% fees plus 1% slippage per side**, not measured fill
 
 Hourly capability reports evaluate contiguous 3,600-second operation windows on the same portfolio. They record completed-trade gross/net results, modeled costs, equity, observed drawdown, fresh-source coverage, and strategy revisions. Long data gaps are insufficient evidence. A no-trade hour is not a win, and mixed strategy revisions are not a controlled enhancement comparison.
 
-The separately requested ten-minute agent-led GitHub improvement schedule is not active: creation was rejected while the project was undeployed. Paid always-on hosting still requires its product confirmation and publication. A current Preview worker is not a confirmed 24/7 deployment.
+The active ten-minute agent-led task now performs evidence-based strategy optimization, not a quota of two enhancements. It retains the incumbent when new real data and held-out improvement are insufficient. The app-native candidate review still runs every 30 minutes. Paid always-on hosting still requires its product confirmation; a current Preview worker is not a confirmed 24/7 deployment.
 
 ## Validation and preserved archives
 
@@ -84,7 +84,7 @@ Reduced-motion preferences, keyboard navigation, inspection, live paper journal 
 
 ## Improvement-cycle Git discipline
 
-Each authorized cycle pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. This workflow does not itself mean the deployment-dependent ten-minute timer is active.
+Each authorized cycle pulls the latest GitHub `main` first, implements and validates the changes, fetches `main` again before delivery, merges any intervening updates, reruns affected checks, and pushes the integrated result back to `main`. There is no force-push or overwrite of independent edits. The active ten-minute strategy task follows this integration order; it must report no change when evidence is insufficient.
 
 The managed dashboard is connected to the durable forward-paper optimizer. The separately available legacy `src.live_feed.Feed` implementation and its newly pulled v8 helper modules are preserved in this repository, but are a distinct runner. Active strategy telemetry reports the durable worker's actual limits rather than incorrectly advertising unused legacy thresholds. A future strategy integration must be validated against the active runner, not assumed from changes to another entry point.
 
@@ -111,3 +111,19 @@ Run `pnpm test:concurrency` for two-connection SQLite handoff, six-position/seve
 ### Reconciled reserve-curve data
 
 Concurrent main PR #5 is retained in the repaired runtime. Curve progress comes from actual bonding-curve reserve account data via one batched `getMultipleAccounts` read, not market capitalization divided by a guessed graduation threshold. A missing reserve read does not create a zero-percent watch anchor, qualify an entry, or falsely flatten a held position. Market-cap observations still update held paper positions; pending watches preserve their captured durations. An adequately provisioned `SOLANA_RPC_URL` is needed for both reserve and holder validation. Historical proxy-curve statistics in older diagnostics should not be treated as reserve measurements for this version.
+
+## Price-feed activity versus paper-entry readiness
+
+The price feed can be live while no paper entry qualifies. `entryReadiness` now separates pending watches, unverified holder/reserve data, overdue watches, and cumulative expired watches; the dashboard explicitly shows entry blocking rather than implying an inactive price feed. Local replicas may be standby readers of a shared lease-owned worker and must not force a takeover.
+
+An undecided non-held watch expires once its own captured long duration plus 120 seconds passes. Expiry is a lease-fenced SKIP decision, not a closed trade, cash mutation, or profit/loss. Held positions are protected, and expiry works even for empty/source-failed batches. Decided expired watches can release bounded admission slots without rewriting the timing of surviving watches.
+
+Holder checks interleave listing and refreshed tracked candidates and prefer the least recently attempted tracked member. This avoids repeatedly selecting the first member of stable eight-token refresh chunks. Metadata remains bounded to current candidates, and per-poll limits remain two holder checks, eight details, and one reserve batch. Failed risk-cache values use short failure backoff; known values retain their positive TTL.
+
+The configured protected provider was tested without logging its URL/key: version and real reserve reads succeeded, but holder verification returned HTTP 403. Provider permission for `getTokenLargestAccounts` (and the subsequent supply/owner methods) must be enabled, or a compatible provider supplied, before those risk checks can qualify paper entries. No alternate route, unknown-as-safe value, fake fill, or risk relaxation is used to bypass that denial.
+
+Run `pnpm test:liveness` and `pnpm test:entry-status` for isolated expiry/scheduling and readiness-display regressions. On-demand hosting is not guaranteed continuous execution; the owner's Reserved/always-on product confirmation is still required before 24/7 residency can be claimed.
+
+If the event transport repeatedly fails, the client falls back to one in-flight current-live JSON read every 15 seconds while EventSource retries. Repeated stream errors cannot continually cancel those reads; a valid event resumes streaming and stops polling. The status caption explicitly labels live polling. This is still fresh data from the running engine, never a stored snapshot or test fixture. Display pause/unmount cancel recovery.
+
+The browser-side live JSON request allowance is 35 seconds: a measured valid live response took about 21 seconds and was previously aborted by a 20-second limit. Polling still allows only one in-flight read, and failures remain explicit rather than reverting to archives.

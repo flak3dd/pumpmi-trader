@@ -13,6 +13,8 @@
     "test:ui": "tsx scripts/test_ui.tsx",
     "test:sliders": "tsx scripts/test_slider_concurrency.tsx",
     "test:concurrency": "python3 scripts/test_concurrency.py && python3 scripts/test_transaction_edges.py",
+    "test:liveness": "python3 scripts/test_watch_liveness.py",
+    "test:entry-status": "tsx scripts/test_entry_status.tsx",
     "format": "prettier --write src vite.config.ts scripts/test_ui.tsx",
     "start": "python3 scripts/serve.py"
   },

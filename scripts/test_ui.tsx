@@ -609,6 +609,70 @@ assert.equal(
   "automatic promotion must not overwrite unsaved user draft",
 );
 configHook.unmount();
+
+// Repeated event-transport failures must not abort current JSON-live polling.
+const nativeInterval = globalThis.setInterval;
+const nativeClearInterval = globalThis.clearInterval;
+let pollingTick: (() => void) | undefined;
+let pollStopped = false;
+const pollHandle = {} as ReturnType<typeof setInterval>;
+globalThis.setInterval = ((
+  callback: () => void,
+  delay: number,
+  ...args: any[]
+) => {
+  if (delay === 15_000) {
+    pollingTick = callback;
+    return pollHandle;
+  }
+  return nativeInterval(callback, delay, ...args);
+}) as typeof setInterval;
+globalThis.clearInterval = ((handle: any) => {
+  if (handle === pollHandle) pollStopped = true;
+  else nativeClearInterval(handle);
+}) as typeof clearInterval;
+try {
+  render(React.createElement(App));
+  await screen.findByText("LIVE FEED · VERIFIED");
+  const transport = MockEventSource.instances.at(-1)!;
+  await act(async () => transport.emitError());
+  await screen.findByText("LIVE FEED DISCONNECTED");
+  assert.ok(
+    pollingTick,
+    "a broken event transport enables current-live polling",
+  );
+  let resolvePoll!: (response: Response) => void;
+  deferredBootstrap = new Promise<Response>((resolve) => {
+    resolvePoll = resolve;
+  });
+  const beforePoll = requests.filter(
+    (request) => request === "GET /api/live-feed",
+  ).length;
+  await act(async () => {
+    pollingTick!();
+    await Promise.resolve();
+  });
+  await act(async () => {
+    transport.emitError();
+    pollingTick!();
+  });
+  assert.equal(
+    requests.filter((request) => request === "GET /api/live-feed").length,
+    beforePoll + 1,
+    "retries neither stack nor cancel the one live request",
+  );
+  await act(async () => resolvePoll(Response.json(structuredClone(liveFrame))));
+  await screen.findByText("LIVE FEED · VERIFIED");
+  assert.ok(screen.getByText(/live polling; stream reconnecting/));
+  await act(async () => transport.emitFeed(liveFrame));
+  assert.ok(pollStopped, "a valid event stops the live polling fallback");
+  assert.equal(screen.queryByText(/live polling; stream reconnecting/), null);
+} finally {
+  deferredBootstrap = null;
+  cleanup();
+  globalThis.setInterval = nativeInterval;
+  globalThis.clearInterval = nativeClearInterval;
+}
 console.log(
-  "UI checks passed: live bootstrap and EventSource feed, no historical fallback, disconnected stale frame, market-watch paths, 3 timeframes, 6 slots, debounced config sliders, failed-save retry, StrictMode stale-load protection, journal filtering, preferences, and live paper execution semantics.",
+  "UI checks passed: live bootstrap, EventSource and bounded live polling recovery, no historical fallback, disconnected stale frame, market-watch paths, 3 timeframes, 6 slots, debounced config sliders, failed-save retry, StrictMode stale-load protection, journal filtering, preferences, and live paper execution semantics.",
 );

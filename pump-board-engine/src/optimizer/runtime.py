@@ -37,6 +37,10 @@ LEASE_TTL_SECONDS = 75
 MAX_TRACKED = 64
 MAX_DONE_CARDS = 80
 OBSERVATION_READ_LIMIT = 30_000
+# A watch needs actual samples, not elapsed time. This finite grace leaves room
+# for an ordinary delayed poll without allowing a missing path to occupy a slot
+# indefinitely.
+WATCH_EXPIRY_GRACE_SECONDS = 120
 
 
 def _now_iso(timestamp: float | None) -> str | None:
@@ -71,7 +75,22 @@ def _empty_source() -> dict[str, Any]:
 
 
 def _empty_board_stats() -> dict[str, Any]:
-    return {"ticks": 0, "scanned": 0, "buys": 0, "wins": 0, "losses": 0, "skips": 0, "realized": 0.0}
+    return {
+        "ticks": 0, "scanned": 0, "buys": 0, "wins": 0, "losses": 0,
+        "skips": 0, "expiredWatches": 0, "realized": 0.0,
+    }
+
+
+def _empty_entry_readiness() -> dict[str, int | str | None]:
+    """Keep the frontend's optional readiness object deliberately exact."""
+    return {
+        "pending": 0,
+        "holderUnknown": 0,
+        "curveUnknown": 0,
+        "overdue": 0,
+        "expiredTotal": 0,
+        "blocker": None,
+    }
 
 
 def _display_symbol(symbol: Any, mint: Any) -> str:
@@ -112,6 +131,7 @@ def disabled_status(document: dict[str, Any] | None = None, *, error: str | None
         "windows": [],
         "validation": _empty_validation(),
         "reviews": [],
+        "entryReadiness": _empty_entry_readiness(),
     }
 
 
@@ -237,10 +257,15 @@ class OptimizerRuntime:
             # Legacy persisted watches cannot be upgraded into invented samples.
             checkpoints = {}
             started = track.get("watch_started_ts", track.get("started_at"))
+        curve_known = track.get("curve_known") is True
         return {
             "symbol": _display_symbol(track.get("symbol"), track.get("mint")), "mint": track.get("mint"), "name": track.get("name", ""),
             "column": "checking", "verdict": "WATCH", "mcap": round(float(track.get("last_mcap") or 0)),
-            "curve_pct": track.get("last_curve"), "top10_pct": (track.get("risk") or {}).get("top10_pct"),
+            # Never display the numeric 0 reserve placeholder as a current curve
+            # reading. The last known anchor remains persisted for checkpoints.
+            "curve_pct": track.get("last_curve") if curve_known else None,
+            "curve_known": curve_known,
+            "top10_pct": (track.get("risk") or {}).get("top10_pct"),
             "dev_pct": (track.get("risk") or {}).get("dev_pct"), "bundle_pct": (track.get("risk") or {}).get("bundle_pct"),
             "ts_seen": started, "watch_started_ts": started, "watch_periods": checkpoints,
             "reason": track.get("reason", "watching actual market-cap path"),
@@ -273,6 +298,107 @@ class OptimizerRuntime:
             tracked.pop(str(track["mint"]), None)
         return tracked
 
+    @staticmethod
+    def _held_mints(portfolio: dict[str, Any]) -> set[str]:
+        positions = portfolio.get("positions", {})
+        if not isinstance(positions, dict):
+            return set()
+        return {
+            str(position.get("mint"))
+            for position in positions.values()
+            if isinstance(position, dict) and position.get("mint") is not None
+        }
+
+    @staticmethod
+    def _watch_expiry_deadline(track: dict[str, Any]) -> float | None:
+        """Return the persisted long-window deadline without creating a sample."""
+        try:
+            started = watch_started_at(track)
+            checkpoints = watch_checkpoint_state(track, as_of=started)
+            long_duration = _number((checkpoints.get("long") or {}).get("duration_s"))
+        except (TypeError, ValueError, KeyError):
+            return None
+        if long_duration is None or long_duration <= 0:
+            return None
+        return started + long_duration + WATCH_EXPIRY_GRACE_SECONDS
+
+    def _expire_pending_watches(
+        self,
+        tracked: dict[str, dict[str, Any]],
+        portfolio: dict[str, Any],
+        done: list[dict[str, Any]],
+        stats: dict[str, Any],
+        events: list[str],
+        *,
+        now: float,
+    ) -> None:
+        """Mark stale undecided paths once, inside the caller's lease fence.
+
+        This intentionally operates from durable captured watch durations and the
+        wall clock only. It never synthesizes an observation, checkpoint, trade,
+        or P&L value, and held paths remain immune even if their tracking card is
+        malformed or unexpectedly undecided.
+        """
+        held = self._held_mints(portfolio)
+        for key, track in list(tracked.items()):
+            if not isinstance(track, dict) or track.get("entry_decided"):
+                continue
+            mint = str(track.get("mint") or key)
+            if mint in held:
+                continue
+            deadline = self._watch_expiry_deadline(track)
+            if deadline is None or now < deadline:
+                continue
+            track["entry_decided"] = True
+            track["expired_at"] = now
+            track["reason"] = (
+                "SKIP watch expired: no actual long checkpoint before captured "
+                f"long duration + {WATCH_EXPIRY_GRACE_SECONDS}s grace"
+            )
+            done.append({
+                **self._watch_card(track, as_of=now), "column": "done",
+                "verdict": "SKIP", "reason": track["reason"],
+            })
+            stats["skips"] = int(stats.get("skips", 0)) + 1
+            stats["expiredWatches"] = int(stats.get("expiredWatches", 0)) + 1
+            events.append(f"{_now_iso(now)} SKIP {track.get('symbol', mint)} watch expired")
+
+    def _entry_readiness(
+        self,
+        tracked: dict[str, Any],
+        portfolio: dict[str, Any],
+        stats: dict[str, Any],
+        *,
+        now: float,
+    ) -> dict[str, int | str | None]:
+        """Describe factual entry blockers without implying entry eligibility."""
+        readiness = _empty_entry_readiness()
+        held = self._held_mints(portfolio)
+        for key, raw_track in tracked.items():
+            if not isinstance(raw_track, dict) or raw_track.get("entry_decided"):
+                continue
+            mint = str(raw_track.get("mint") or key)
+            if mint in held:
+                continue
+            readiness["pending"] = int(readiness["pending"] or 0) + 1
+            risk = raw_track.get("risk")
+            if not isinstance(risk, dict) or risk.get("status") != "known":
+                readiness["holderUnknown"] = int(readiness["holderUnknown"] or 0) + 1
+            if raw_track.get("curve_known") is not True:
+                readiness["curveUnknown"] = int(readiness["curveUnknown"] or 0) + 1
+            deadline = self._watch_expiry_deadline(raw_track)
+            if deadline is not None and now >= deadline:
+                readiness["overdue"] = int(readiness["overdue"] or 0) + 1
+        expired_total = _number(stats.get("expiredWatches")) if isinstance(stats, dict) else None
+        readiness["expiredTotal"] = max(0, int(expired_total or 0))
+        if readiness["holderUnknown"]:
+            readiness["blocker"] = "holder risk data blocked"
+        elif readiness["curveUnknown"]:
+            readiness["blocker"] = "reserve data blocked"
+        elif readiness["pending"]:
+            readiness["blocker"] = "watch awaiting checkpoints"
+        return readiness
+
     def _portfolio_status(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         equity = refresh_equity(portfolio)
         return {
@@ -300,7 +426,11 @@ class OptimizerRuntime:
             return disabled_status(self.config())
         now = time.time() if now is None else now
         source = self.store.get_state("source", _empty_source())
-        portfolio = self.store.get_state("portfolio", initial_portfolio())
+        # Entry readiness is factual, durable state rather than a five-second
+        # telemetry-cache estimate. It is not an assertion that entry is allowed.
+        portfolio = self.store.get_state("portfolio", initial_portfolio(), fresh=True)
+        tracked = self.store.get_state("tracked", {}, fresh=True)
+        stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
         validation = self.store.get_state("validation", _empty_validation())
         health = self._health()
         document = self.config()
@@ -327,6 +457,7 @@ class OptimizerRuntime:
             "windows": self._windows(now),
             "validation": validation,
             "reviews": self.store.reviews(),
+            "entryReadiness": self._entry_readiness(tracked, portfolio, stats, now=now),
         }
 
     def _record_closed(self, trade: dict[str, Any], done: list[dict[str, Any]]) -> None:
@@ -390,24 +521,31 @@ class OptimizerRuntime:
         """Run one bounded cycle, renewing the lease before any post-collect commit.
 
         Direct tests can supply deterministic ``now``. Production calls leave it
-        unset so the post-collection fence uses a fresh wall-clock timestamp.
+        unset so collection receives no fixed clock and every decision inside the
+        post-collection fence uses a fresh wall-clock timestamp.
         """
         if not self.enabled or not self.lease_owned:
             return False
         explicit_now = now is not None
-        now = time.time() if now is None else now
         # Collection is intentionally outside a database transaction. This first
         # snapshot only tells the source which mints to ask for; all trading state
         # is reloaded authoritatively after the post-collection lease fence.
         collect_tracked = self.store.get_state("tracked", {})
-        batch = self.source.collect(list(collect_tracked)[:MAX_TRACKED], now=now)
-        renew_now = now if explicit_now else time.time()
+        # ``None`` explicitly means that a production source must sample actual
+        # receipt times itself, rather than inheriting a pre-collection tick time.
+        batch = self.source.collect(list(collect_tracked)[:MAX_TRACKED], now=now if explicit_now else None)
+        renew_now = float(now) if explicit_now else time.time()
         if not self._renew_lease(now=renew_now):
             # A newer worker owns the lease. This stale collector must write nothing.
             return False
-        fence_now = now if explicit_now else None
+        fence_now = float(now) if explicit_now else None
         try:
             with self.store.lease_fence("optimizer-worker", self.boot_id, now=fence_now):
+                # The fence owns the authoritative transaction and has already
+                # checked the live lease clock. Capture this only after collection
+                # and after entering the fence: a row cannot fill checkpoints or
+                # enter after its durable watch deadline passed while collecting.
+                mutation_now = float(now) if explicit_now else time.time()
                 # Fresh bypasses the telemetry cache. Existing watches retain their
                 # persisted durations; only a just-created watch uses this freshly
                 # re-read post-collection document.
@@ -416,17 +554,8 @@ class OptimizerRuntime:
                 source_status = self.store.get_state("source", _empty_source(), fresh=True)
                 self._assert_portfolio_capacity(portfolio)
                 config = self.config()
-                if batch.error:
-                    source_status.update({"name": batch.source_name, "error": batch.error, "social": batch.social, "trackedTokens": len(tracked)})
-                    self.store.set_many_state({
-                        "source": source_status,
-                        "portfolio": portfolio,
-                        "events": self._event(f"source failure: {batch.error}", now=now),
-                    }, now=now)
-                    self._set_health(runtime="degraded", now=now, error=batch.error)
-                    return True
-
-                self.store.record_observations(batch.observations)
+                if not isinstance(source_status, dict):
+                    source_status = _empty_source()
                 done = self.store.get_state("done_cards", [], fresh=True)
                 events = self.store.get_state("events", [], fresh=True)
                 stats = self.store.get_state("board_stats", _empty_board_stats(), fresh=True)
@@ -438,9 +567,39 @@ class OptimizerRuntime:
                     stats = _empty_board_stats()
                 for key, value in _empty_board_stats().items():
                     stats.setdefault(key, value)
+                # Wall-clock expiry must run even when collection supplied no
+                # usable reserve quote or failed before it produced a batch.
+                self._expire_pending_watches(tracked, portfolio, done, stats, events, now=mutation_now)
+                if batch.error:
+                    source_status.update({"name": batch.source_name, "error": batch.error, "social": batch.social, "trackedTokens": len(tracked)})
+                    events.append(f"{_now_iso(mutation_now)} source failure: {batch.error}")
+                    self.store.set_many_state({
+                        "tracked": tracked, "portfolio": portfolio, "source": source_status,
+                        "done_cards": done[-MAX_DONE_CARDS:], "events": events[-60:], "board_stats": stats,
+                    }, now=mutation_now)
+                    self._set_health(runtime="degraded", now=mutation_now, error=batch.error)
+                    return True
+
+                # A source row that predates a durable track cannot rewrite its
+                # current reserve state or fill a checkpoint retroactively.
+                accepted_observations: list[dict[str, Any]] = []
+                for item in batch.observations:
+                    if not isinstance(item, dict):
+                        continue
+                    mint = str(item.get("mint") or "")
+                    observed_at = _number(item.get("observed_at"))
+                    if not mint or observed_at is None or observed_at > mutation_now:
+                        continue
+                    existing = tracked.get(mint)
+                    previous_seen = _number(existing.get("last_seen")) if isinstance(existing, dict) else None
+                    if previous_seen is not None and observed_at <= previous_seen:
+                        continue
+                    accepted_observations.append(item)
+
+                self.store.record_observations(accepted_observations)
                 stats["ticks"] = int(stats["ticks"]) + 1
-                stats["scanned"] = int(stats["scanned"]) + len(batch.observations)
-                observed_by_mint = {str(item["mint"]): item for item in batch.observations}
+                stats["scanned"] = int(stats["scanned"]) + len(accepted_observations)
+                observed_by_mint = {str(item["mint"]): item for item in accepted_observations}
                 # Existing open positions consume only their own actual mcap observations.
                 for position_id, position in list(portfolio["positions"].items()):
                     observation = observed_by_mint.get(str(position["mint"]))
@@ -454,11 +613,11 @@ class OptimizerRuntime:
                             stats["wins"] = int(stats["wins"]) + 1
                         elif float(event["net"]) < 0:
                             stats["losses"] = int(stats["losses"]) + 1
-                        events.append(f"{_now_iso(now)} EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
+                        events.append(f"{_now_iso(mutation_now)} EXIT {event['symbol']} {event['reason']} net ${event['net']:+.2f}")
                     elif event and event["status"] == "scaled":
-                        events.append(f"{_now_iso(now)} SCALE {position['symbol']} {event['reason']}")
+                        events.append(f"{_now_iso(mutation_now)} SCALE {position['symbol']} {event['reason']}")
 
-                for observation in batch.observations:
+                for observation in accepted_observations:
                     mint = str(observation["mint"])
                     # Preserve main's reserve-data truth inside the atomic fence.
                     curve_known = observation.get("curve_known") is not False
@@ -478,7 +637,7 @@ class OptimizerRuntime:
                     tracked[mint] = track
                     track.update({
                         "symbol": observation["symbol"], "name": observation.get("name", ""), "last_seen": float(observation["observed_at"]),
-                        "last_mcap": observation["market_cap"], "risk": observation.get("risk"),
+                        "last_mcap": observation["market_cap"], "risk": observation.get("risk"), "curve_known": bool(curve_known),
                     })
                     if curve_known:
                         track["last_curve"] = observation["curve_pct"]
@@ -490,7 +649,7 @@ class OptimizerRuntime:
                     except (TypeError, ValueError, KeyError):
                         track["entry_decided"] = True
                         track["reason"] = "SKIP checkpoint state unavailable"
-                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
                         continue
                     if track.get("entry_decided"):
@@ -503,39 +662,45 @@ class OptimizerRuntime:
                         reason = "max 6 open positions"
                     if reason is not None:
                         track["reason"] = f"SKIP {reason}"
-                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
-                        events.append(f"{_now_iso(now)} SKIP {track['symbol']} {reason}")
+                        events.append(f"{_now_iso(mutation_now)} SKIP {track['symbol']} {reason}")
                         continue
                     position = open_position(portfolio, observation, strategy_revision=int(config["revision"]), watch=track)
                     if position is None:
                         track["reason"] = "SKIP insufficient paper cash"
-                        done.append({**self._watch_card(track, as_of=now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
+                        done.append({**self._watch_card(track, as_of=mutation_now), "column": "done", "verdict": "SKIP", "reason": track["reason"]})
                         stats["skips"] = int(stats["skips"]) + 1
-                        events.append(f"{_now_iso(now)} SKIP {track['symbol']} insufficient paper cash")
+                        events.append(f"{_now_iso(mutation_now)} SKIP {track['symbol']} insufficient paper cash")
                     else:
                         track["reason"] = "entered after three actual immutable watch checkpoints; social unavailable and unused"
                         stats["buys"] = int(stats["buys"]) + 1
-                        events.append(f"{_now_iso(now)} BUY {track['symbol']} ${position['initial_notional']:.2f} actual mcap ${position['entry_mcap']:,.0f}")
+                        events.append(f"{_now_iso(mutation_now)} BUY {track['symbol']} ${position['initial_notional']:.2f} actual mcap ${position['entry_mcap']:,.0f}")
 
                 self._trim_tracks(tracked, portfolio)
                 done = done[-MAX_DONE_CARDS:]
+                accepted_times = [_number(item.get("observed_at")) for item in accepted_observations]
+                last_observed = max((value for value in accepted_times if value is not None), default=None)
+                prior_observed = _number(source_status.get("lastObservation"))
                 source_status.update({
-                    "name": batch.source_name, "lastObservation": now if batch.observations else source_status.get("lastObservation"), "error": None,
-                    "observations": int(source_status.get("observations", 0)) + len(batch.observations), "trackedTokens": len(tracked), "social": batch.social,
+                    "name": batch.source_name,
+                    "lastObservation": max((value for value in (prior_observed, last_observed) if value is not None), default=None),
+                    "error": None,
+                    "observations": int(source_status.get("observations", 0)) + len(accepted_observations), "trackedTokens": len(tracked), "social": batch.social,
                 })
                 self.store.set_many_state({
                     "tracked": tracked, "portfolio": portfolio, "source": source_status,
                     "done_cards": done, "events": events[-60:], "board_stats": stats,
-                }, now=now)
-                self._run_rollback_if_needed(now=now, portfolio=portfolio)
-                self._set_health(runtime="running", now=now)
+                }, now=mutation_now)
+                self._run_rollback_if_needed(now=mutation_now, portfolio=portfolio)
+                self._set_health(runtime="running", now=mutation_now)
         except LeaseLost:
             self.lease_owned = False
             return False
 
         self.local_error = None
-        self.maybe_review(now=now, use_wall_clock=not explicit_now)
+        review_now = float(now) if explicit_now else time.time()
+        self.maybe_review(now=review_now, use_wall_clock=not explicit_now)
         return True
 
     def maybe_review(self, *, now: float, use_wall_clock: bool = False) -> None:

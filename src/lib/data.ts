@@ -209,7 +209,7 @@ export async function loadLiveFeed({
   const timeout = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, 20_000);
+  }, 35_000);
   const abortFromCaller = () => controller.abort();
   signal?.addEventListener("abort", abortFromCaller, { once: true });
   try {
@@ -236,7 +236,7 @@ export async function loadLiveFeed({
     return validateLiveFeed(payload);
   } catch (error) {
     if (timedOut)
-      throw new Error("Live feed request timed out after 20 seconds.");
+      throw new Error("Live feed request timed out after 35 seconds.");
     throw error;
   } finally {
     clearTimeout(timeout);

@@ -1077,7 +1077,11 @@ export default function App() {
         : current,
     );
   }
-  function queueLiveBootstrap(generation: number, showFeedback = false) {
+  function queueLiveBootstrap(
+    generation: number,
+    showFeedback = false,
+    polling = false,
+  ) {
     const run = async () => {
       if (
         !mountedRef.current ||
@@ -1099,7 +1103,18 @@ export default function App() {
           controller.signal.aborted
         )
           return;
-        applyLiveFrame(next, generation);
+        applyLiveFrame(
+          polling
+            ? {
+                ...next,
+                meta: {
+                  ...next.meta,
+                  label: `${next.meta.label} · live polling`,
+                },
+              }
+            : next,
+          generation,
+        );
         if (showFeedback)
           notify(
             next.meta.kind === "live"
@@ -1161,6 +1176,18 @@ export default function App() {
     void queueLiveBootstrap(generation);
     let source: EventSource | undefined;
     let poll: ReturnType<typeof setInterval> | undefined;
+    const stopPolling = () => {
+      if (poll) clearInterval(poll);
+      poll = undefined;
+    };
+    const startPolling = () => {
+      if (poll) return;
+      poll = setInterval(() => {
+        // Poll only the current engine, never history; do not stack requests.
+        if (!feedAbort.current)
+          void queueLiveBootstrap(generation, false, true);
+      }, 15_000);
+    };
     if (typeof window.EventSource === "function") {
       try {
         source = new window.EventSource("/api/live-feed/events");
@@ -1175,6 +1202,7 @@ export default function App() {
               pausedRef.current
             )
               return;
+            stopPolling();
             ++streamRevision.current;
             feedAbort.current?.abort();
             applyLiveFrame(frame, generation);
@@ -1184,30 +1212,35 @@ export default function App() {
               "Live feed event was invalid. Reconnect to resume updates.",
               generation,
             );
+            startPolling();
           }
         });
         source.onerror = () => {
           // Keep the EventSource alive: the browser automatically retries a
           // dropped connection. Closing here disables recovery after a handoff.
-          markFeedDisconnected(
-            "Live feed interrupted. Reconnecting automatically…",
-            generation,
-          );
+          // Invalidate the old bootstrap once, not on every retry: repeated
+          // stream errors must not keep aborting a healthy live polling read.
+          if (!poll) {
+            markFeedDisconnected(
+              "Live feed interrupted. Reconnecting automatically…",
+              generation,
+            );
+            startPolling();
+          }
         };
       } catch {
         markFeedDisconnected(
           "Live event stream could not be opened. Reconnect to try again.",
           generation,
         );
+        startPolling();
       }
     } else {
-      poll = setInterval(() => {
-        void queueLiveBootstrap(generation);
-      }, 15_000);
+      startPolling();
     }
     return () => {
       source?.close();
-      if (poll) clearInterval(poll);
+      stopPolling();
       if (feedGeneration.current === generation) feedAbort.current?.abort();
     };
   }, [paused, reconnectNonce]);
@@ -1512,7 +1545,7 @@ export default function App() {
                         ? "Last live frame retained and marked stale"
                         : board!.ts == null
                           ? "Waiting for the first verified market observation"
-                          : `Market data updated ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}`}
+                          : `Market data updated ${board!.updated || new Date(board!.ts * 1000).toLocaleString()}${snapshot.meta.label.includes("live polling") ? " · live polling; stream reconnecting" : ""}`}
                   </span>
                 </div>
                 <button

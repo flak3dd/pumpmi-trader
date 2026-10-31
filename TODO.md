@@ -40,11 +40,11 @@ The completed high-voltage UI and three-tier controls were pushed to `flak3dd/pu
 
 At the user's subsequent request, the completed UI commit `0b8d8e3` was fast-forwarded and pushed to GitHub `main` at 18:44 AEDT. The later optimizer update remains separate until its validation checks pass.
 
-## Ten-minute repository improvement runs
+## Ten-minute strategy-optimization runs
 
-- [ ] Every 10 minutes, safely pull/analyze GitHub `main`, target two substantive evidence-based bot enhancements, validate with isolated tests, and push tested changes to `main`. Keep paper-only operation, six-position/risk caps, user settings, and no guaranteed-profit claims. Report insufficient evidence rather than padding changes.
+- [x] Every 10 minutes, safely pull/analyze GitHub `main` and optimize the actual paper strategy from new real forward evidence, with no two-enhancement or fixed-edit quota. Retain the incumbent when chronological training/holdout evidence does not justify a change. Validate isolated regressions, fetch/merge main again, and push only tested improvements. Preserve paper-only operation, six-position/risk caps, user settings, and no guaranteed-profit claims.
 
-Schedule creation on 2026-10-31 at 18:46 AEDT was rejected by the service: `failed_precondition: project not deployed yet`. No 10-minute schedule is active. Complete the pending product hosting confirmation and publish the verified project before retrying the same scheduled instruction. The app worker's own strategy-review interval remains 30 minutes; the requested 10-minute interval is for agent-led repository analysis/enhancement.
+The first schedule attempt at 18:46 AEDT was rejected before deployment. After the project deployed and the user changed the objective, a 600-second recurring schedule was created successfully at 23:07 AEDT with status active, titled “Pumpmi: evidence-based strategy optimization.” It reuses the current task and does not require two edits. The app worker's own strategy-review interval remains 30 minutes; hourly capability reporting is separate.
 
 ## Hourly full-operation analysis
 
@@ -104,3 +104,21 @@ Concurrent main PR #5 (`1577cb2`) was merged without discarding its reserve-base
 The integrated GitHub main push succeeded at `afd034e`. The reserve-aware merged worker then passed read-only restart verification: fresh market frame, running lease ownership, unchanged revision-7 settings and $1,500 bankroll, zero open/completed positions, no real-money orders, and six-position capacity. Both the original repair and concurrent main changes are retained.
 
 Final main integration also retained incoming net-of-costs profit-lock and SOL/sec flow improvements. All 153 Python tests, UI/slider suites, build, and standalone Python diagnostics pass. The requested dashboard inspection found transient EventSource errors were permanently closing the stream; native automatic reconnect is now preserved, and recovery without a click is regression-tested while stale state remains explicit.
+
+## Live feed collecting but paper pipeline blocked
+
+- [x] Preserve incoming GitHub main improvements, the latest user strategy revision/periods (currently revision 10: 90/210/705 seconds), the $1,500 paper bankroll, and the immutable six-position cap. The API/browser currently prove live data is advancing, not that paper entries qualify.
+- [x] Retire overdue non-held watches at their own captured long duration plus a bounded observation grace period, with truthful skipped/expired decisions, no fabricated completed trade or P&L, and atomic lease-fenced state updates. Expired watches must not remain indefinitely in Checking or obstruct the 64-track admission limit.
+- [x] Rotate the bounded holder-check allowance fairly across candidates rather than permanently starving later tracked tokens. Do not increase RPC/network budgets, weaken risk/curve/flow/depth filters, treat unknown data as safe, or overwrite captured watch durations.
+- [x] Show price-feed activity separately from paper-entry readiness, including unknown holder/reserve data and overdue/expired-watch counts; indicate concrete required data inputs rather than only “waiting for evidence.” Verify timeout, handoff, scheduling, telemetry, and UI behavior using isolated test data, not live test orders.
+- [ ] Request a protected read-only SOLANA_RPC_URL because all 64 currently tracked tokens have unknown holder verification. Never request a wallet seed/private signing key. The deployed project is on-demand: the previously approved always-on mode still requires its product-owned confirmation before it can be claimed active.
+
+The independent liveness review confirmed a deadline-crossing bug: production expiry must use post-collection wall time and source rows must use actual receipt timestamps, not the tick-start clock. This is being corrected with explicit-clock tests retained. Browser inspection also showed a reachable current-live JSON endpoint alongside an empty reconnecting dashboard: repeated EventSource errors cancelled the initial bootstrap and had no live-JSON recovery path. Recovery now polls only the running engine every 15 seconds with a single in-flight request and stops polling when valid stream events resume; it never loads archived data.
+
+## Strategy-optimization cycle instruction update
+
+The user changed the recurring cycle objective on 2026-10-31 at 23:06 AEDT: replace “add two enhancements” with evidence-based strategy optimization. Preserve the requested 10-minute review cadence, pull-main/update/fetch-merge/push discipline, hard six-position cap and existing risk limits. Analyze real forward observations and explicit net execution costs; test bounded strategy candidates chronologically and retain the incumbent whenever data or held-out improvement is insufficient. Do not force a fixed number of edits, weaken data/risk checks, fabricate fills, or promise consistent profit. The app's own validation review remains every 30 minutes and hourly capability reporting is separate.
+
+### Verified software and remaining live prerequisites
+
+Final software checks pass: 93 engine tests with one credential-dependent skip, 13 liveness tests, source/optimizer/concurrency/edge/API/stream/hourly/RPC/cache tests, readiness and full UI/slider DOM checks, production build, and targeted Python diagnostics. The clock-crossing finding is corrected with actual source receipt times and fresh in-fence expiry decisions. Browser recovery uses bounded current-live JSON polling and a 35-second allowance after a valid browser response measured 20.8 seconds. User revision 10 and 90/210/705-second watch defaults, six-position cap and $1,500 bankroll remain unchanged. The protected RPC input was saved and verified for version/reserve reads, but holder verification is HTTP403 and still cannot approve entries. Actual always-on hosting remains unconfirmed; no profit or completed-trade result is asserted.

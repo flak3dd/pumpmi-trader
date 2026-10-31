@@ -9,65 +9,257 @@ import {
   Radio,
   ShieldCheck,
   TriangleAlert,
+  Zap,
 } from "lucide-react";
 import { duration, money } from "../lib/data";
 import { timeLabel, type OptimizerStatus } from "../lib/optimizer";
 
 type Props = { status: OptimizerStatus | null; error: string };
+type EntryReadiness = NonNullable<OptimizerStatus["entryReadiness"]>;
+
+function count(value: number) {
+  return Math.max(0, Math.trunc(Number.isFinite(value) ? value : 0));
+}
+
+function EntryReadinessStrip({
+  readiness,
+  priceLabel,
+  priceTone,
+}: {
+  readiness?: EntryReadiness;
+  priceLabel: string;
+  priceTone: "live" | "waiting" | "stale" | "loading";
+}) {
+  if (!readiness) {
+    return (
+      <section
+        className="entry-readiness unavailable"
+        aria-label="Entry readiness"
+      >
+        <div className="entry-readiness-summary">
+          <span className={`entry-price-state ${priceTone}`}>
+            <Radio size={12} /> {priceLabel}
+          </span>
+          <div>
+            <span className="entry-readiness-eyebrow">ENTRY READINESS</span>
+            <h3>Entry verification telemetry unavailable</h3>
+            <p>
+              This optimizer status does not report watcher verification yet.
+              Live-price collection and paper-entry checks are reported
+              separately.
+            </p>
+          </div>
+        </div>
+        <div
+          className="entry-readiness-stats"
+          aria-label="Entry verification counts"
+        >
+          <div>
+            <span>Current watchers</span>
+            <b>—</b>
+          </div>
+          <div>
+            <span>Holders verified</span>
+            <b>—</b>
+          </div>
+          <div>
+            <span>Reserves verified</span>
+            <b>—</b>
+          </div>
+          <div>
+            <span>Overdue</span>
+            <b>—</b>
+          </div>
+          <div>
+            <span>Expired total</span>
+            <b>—</b>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  const pending = count(readiness.pending);
+  const holderUnknown = Math.min(pending, count(readiness.holderUnknown));
+  const curveUnknown = Math.min(pending, count(readiness.curveUnknown));
+  const overdue = count(readiness.overdue);
+  const expiredTotal = count(readiness.expiredTotal);
+  const holdersVerified = pending - holderUnknown;
+  const reservesVerified = pending - curveUnknown;
+  const allHoldersUnknown = pending > 0 && holderUnknown === pending;
+  const verificationPending =
+    pending > 0 && (holderUnknown > 0 || curveUnknown > 0);
+  const blocker = readiness.blocker?.trim() || null;
+  const tone = allHoldersUnknown
+    ? "blocked"
+    : verificationPending
+      ? "pending"
+      : blocker
+        ? "blocked"
+        : pending === 0
+          ? "no-signal"
+          : "verified";
+  const heading = allHoldersUnknown
+    ? "Paper entries blocked"
+    : verificationPending
+      ? "Verification pending"
+      : blocker
+        ? "Entry checks blocked"
+        : pending === 0
+          ? "No entry candidates yet"
+          : "Verification current";
+  const description = allHoldersUnknown
+    ? "Every current watcher is missing holder verification. A provisioned read-only SOLANA_RPC_URL is required — not a wallet seed or signing key."
+    : verificationPending
+      ? "Some watcher checks are still incomplete. Paper entries await verification; this is not a trade or profit signal."
+      : blocker
+        ? "A backend safeguard is preventing entry evaluation. This status does not imply a paper trade or profit."
+        : pending === 0
+          ? "Live prices may still be collecting. No watcher currently qualifies for entry evaluation."
+          : "Watcher checks are current. This is verification status only, not an entry, trade, or profit signal.";
+
+  return (
+    <section
+      className={`entry-readiness ${tone}`}
+      aria-label="Entry readiness"
+      aria-live="polite"
+    >
+      <div className="entry-readiness-summary">
+        <span className={`entry-price-state ${priceTone}`}>
+          <Radio size={12} /> {priceLabel}
+        </span>
+        <span className="entry-readiness-icon" aria-hidden="true">
+          <Zap size={18} />
+        </span>
+        <div>
+          <span className="entry-readiness-eyebrow">ENTRY READINESS</span>
+          <h3>{heading}</h3>
+          <p>{description}</p>
+          {blocker && (
+            <p className="entry-readiness-blocker">
+              <span>Backend blocker</span>
+              {blocker}
+            </p>
+          )}
+        </div>
+      </div>
+      <div
+        className="entry-readiness-stats"
+        aria-label="Entry verification counts"
+      >
+        <div>
+          <span>Current watchers</span>
+          <b>{pending.toLocaleString()}</b>
+        </div>
+        <div>
+          <span>Holders verified</span>
+          <b>
+            {holdersVerified.toLocaleString()} / {pending.toLocaleString()}
+          </b>
+        </div>
+        <div>
+          <span>Reserves verified</span>
+          <b>
+            {reservesVerified.toLocaleString()} / {pending.toLocaleString()}
+          </b>
+        </div>
+        <div>
+          <span>Overdue</span>
+          <b>{overdue.toLocaleString()}</b>
+        </div>
+        <div>
+          <span>Expired total</span>
+          <b>{expiredTotal.toLocaleString()}</b>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function OptimizerPanel({ status, error }: Props) {
-  const active = status?.enabled && status.runtime === "running";
   const fresh =
     status?.source.lastObservation != null &&
     Date.now() / 1000 - status.source.lastObservation < 180;
+  const liveSource = Boolean(status?.enabled && fresh);
+  const sharedReplica = Boolean(
+    status?.enabled &&
+      !status.leaseOwned &&
+      fresh &&
+      (status.runtime === "running" || status.runtime === "standby"),
+  );
+  const priceLabel = !status
+    ? "Live price telemetry loading"
+    : fresh
+      ? "Live prices collecting"
+      : status.source.lastObservation == null
+        ? "Awaiting first live price"
+        : "Live prices stale";
+  const priceTone = !status
+    ? "loading"
+    : fresh
+      ? "live"
+      : status.source.lastObservation == null
+        ? "waiting"
+        : "stale";
   const runtimeLabel = !status
-    ? "Connecting"
+    ? "Loading optimizer telemetry"
     : !status.enabled
-      ? "Worker not enabled"
-      : status.runtime === "running"
-        ? fresh
-          ? "Collecting market data"
-          : "Awaiting fresh prices"
-        : status.runtime === "warming_up"
-          ? "Warming up"
-          : status.runtime === "standby"
-            ? "Worker standby"
-            : "Data collection interrupted";
+      ? "Optimizer disabled"
+      : sharedReplica
+        ? "Shared live feed · replica standby"
+        : status.runtime === "running"
+          ? fresh
+            ? "Collecting market data"
+            : "Awaiting fresh prices"
+          : status.runtime === "warming_up"
+            ? "Warming up"
+            : status.runtime === "standby"
+              ? "Replica standby · shared feed"
+              : "Data collection interrupted";
   const validation = status?.validation;
   const portfolio = status?.portfolio;
-  const decision =
-    validation?.state === "promoted"
+  const decision = !status
+    ? "Loading strategy telemetry"
+    : validation?.state === "promoted"
       ? "Validated candidate promoted"
       : validation?.state === "rolled_back"
         ? "Prior champion restored"
         : validation?.state === "kept"
           ? "Champion retained"
           : "Waiting for evidence";
+  const decisionReason = !status
+    ? "Waiting for optimizer telemetry. Paper strategy settings remain read-only here."
+    : validation?.reason ||
+      "Waiting for validation evidence. No strategy change will be made without held-out validation.";
   const windows = status?.windows.slice(-12) || [];
   const max = Math.max(1, ...windows.map((w) => Math.abs(w.net)));
   return (
     <section
       className="optimizer-panel panel"
-      aria-label="Always-on paper optimizer"
+      aria-label="Paper strategy optimizer"
     >
       <div className="panel-heading">
         <span>
           <BrainCircuit size={17} /> Strategy optimizer{" "}
           <span className="dim-label">/ 30-MINUTE REVIEW CYCLE</span>
         </span>
-        <span
-          className={`optimizer-runtime ${active && fresh ? "running" : ""}`}
-        >
+        <span className={`optimizer-runtime ${liveSource ? "running" : ""}`}>
           <span />
           {runtimeLabel}
         </span>
       </div>
+      <EntryReadinessStrip
+        readiness={status?.entryReadiness}
+        priceLabel={priceLabel}
+        priceTone={priceTone}
+      />
       <div className="optimizer-grid">
         <div className="optimizer-performance">
           <div className="optimizer-eyebrow">
             <FlaskConical size={12} /> FORWARD PAPER · MODELED EXECUTION COSTS
           </div>
           <div className="optimizer-net">
-            <span>Net realized P&L</span>
+            <span>Net realized P&amp;L</span>
             <strong
               className={
                 portfolio && portfolio.netRealized < 0
@@ -139,10 +331,7 @@ export default function OptimizerPanel({ status, error }: Props) {
             </span>
             <div>
               <h3>{decision}</h3>
-              <p>
-                {validation?.reason ||
-                  "Start the published worker to collect fresh observations. No strategy change will be made without held-out validation."}
-              </p>
+              <p>{decisionReason}</p>
             </div>
           </div>
           <div className="evidence-progress">
@@ -206,14 +395,16 @@ export default function OptimizerPanel({ status, error }: Props) {
         </span>
         <span>
           <Clock3 size={12} /> Last review{" "}
-          {timeLabel(status?.lastReview ?? null)} · next{" "}
+          {timeLabel(status?.lastReview ?? null)}· next{" "}
           {timeLabel(status?.nextReview ?? null)}
         </span>
         <span>
           <Database size={12} />{" "}
-          {status?.enabled
-            ? "Durable database state"
-            : "Forward worker disabled"}
+          {!status
+            ? "Optimizer telemetry loading"
+            : status.enabled
+              ? "Durable database state"
+              : "Optimizer disabled"}
         </span>
       </div>
       {status?.champion && (
@@ -245,7 +436,7 @@ export default function OptimizerPanel({ status, error }: Props) {
       <div className="optimizer-hourly">
         <div>
           <Clock3 size={13} />
-          <strong>Hourly capability & profitability</strong>
+          <strong>Hourly capability &amp; profitability</strong>
           <span>Same paper portfolio · contiguous 1-hour windows</span>
         </div>
         {status?.hourlyReports?.length ? (
@@ -272,9 +463,11 @@ export default function OptimizerPanel({ status, error }: Props) {
             ))
         ) : (
           <p>
-            {status?.enabled
-              ? "First full-hour report pending. No overlapping bot copies or bankroll resets."
-              : "Hourly sessions begin when the approved published worker is active."}
+            {!status
+              ? "Hourly reporting status loading."
+              : status.enabled
+                ? "First full-hour report pending. No overlapping bot copies or bankroll resets."
+                : "Hourly reports are unavailable while the optimizer is disabled."}
           </p>
         )}
       </div>

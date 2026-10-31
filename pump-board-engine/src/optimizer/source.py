@@ -69,9 +69,10 @@ def _rpc_value(payload: Any, method: str, label: str = "holder") -> Any:
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         raise SourceError(f"{label} {method} returned an invalid JSON-RPC envelope")
     if payload.get("error") is not None:
-        error = payload.get("error")
-        message = error.get("message") if isinstance(error, dict) else str(error)
-        raise SourceError(f"{label} {method} RPC error: {str(message)[:120]}")
+        # Provider-supplied error text can unexpectedly contain request context.
+        # Never place it in holder-risk telemetry where a private RPC URL/key
+        # could be exposed through a provider echo.
+        raise SourceError(f"{label} {method} RPC error")
     result = payload.get("result")
     if not isinstance(result, dict) or "value" not in result:
         raise SourceError(f"{label} {method} returned no result value")
@@ -217,7 +218,10 @@ class HolderRiskCache:
         except SourceError as exc:
             self.backoff_until = now + self.failure_backoff_seconds
             result = {"status": "unknown", "reason": str(exc)}
-        self.cache[mint] = (now + self.ttl_seconds, result)
+        # Failed checks are retryable after the existing provider backoff. They
+        # must not occupy the successful-data TTL (normally five minutes).
+        ttl = self.ttl_seconds if result.get("status") == "known" else self.failure_backoff_seconds
+        self.cache[mint] = (now + ttl, result)
         return dict(result)
 
 
@@ -246,9 +250,13 @@ class PumpFunSource:
         self.holder_cache = holder_cache or HolderRiskCache(rpc=lambda payload: _rpc_json(payload, timeout=4.0))
         self.max_listing = min(30, max(1, max_listing))
         self.max_tracked = min(64, max(1, max_tracked))
-        self.max_tracked_refresh = min(self.max_tracked, max(1, max_tracked_refresh))
+        self.max_tracked_refresh = min(8, self.max_tracked, max(1, max_tracked_refresh))
         self.max_holder_checks = min(2, max(1, max_holder_checks))
         self._tracked_cursor = 0
+        self._listing_holder_cursor = 0
+        self._holder_lane = 0
+        self._holder_attempt_sequence = 0
+        self._holder_attempts: dict[str, int] = {}
 
     @staticmethod
     def _market_cap(coin: dict[str, Any]) -> float:
@@ -315,14 +323,65 @@ class PumpFunSource:
             raise SourceError("frontend-api-v3 coin detail returned a non-object payload")
         return payload
 
+    def _holder_priority(
+        self,
+        listing_candidates: list[dict[str, Any]],
+        refreshed_tracked: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Interleave two bounded lanes so refreshed watches are not starved.
+
+        The first two uncached candidates are one listing and one refreshed watch
+        whenever both lanes exist. Each following poll flips the leading lane and
+        rotates the listing start, while detail refreshes retain their own durable
+        cursor. This changes selection only; it cannot increase RPC or detail
+        budgets.
+        """
+        listing: list[dict[str, Any]] = []
+        if listing_candidates:
+            start = self._listing_holder_cursor % len(listing_candidates)
+            listing = listing_candidates[start:] + listing_candidates[:start]
+            self._listing_holder_cursor = (start + 1) % len(listing_candidates)
+        # A rotating detail chunk still has the same first mint each time it
+        # returns. Select the least recently attempted member, including when
+        # failures expire before the chunk's next visit.
+        tracked = sorted(
+            refreshed_tracked,
+            key=lambda coin: self._holder_attempts.get(str(coin.get("mint")), -1),
+        )
+        lanes = [listing, tracked] if self._holder_lane == 0 else [tracked, listing]
+        self._holder_lane = 1 - self._holder_lane
+        priority: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        index = 0
+        while any(index < len(lane) for lane in lanes):
+            for lane in lanes:
+                if index >= len(lane):
+                    continue
+                coin = lane[index]
+                mint = str(coin.get("mint") or "")
+                if mint and mint not in seen:
+                    priority.append(coin)
+                    seen.add(mint)
+            index += 1
+        return priority
+
     def collect(self, tracked_mints: list[str], *, now: float | None = None) -> SourceBatch:
-        now = time.time() if now is None else now
+        # An explicit timestamp is a deterministic-test clock. Production leaves it
+        # unset, so every observation is stamped only once the response that
+        # supplied its data has actually been received.
+        def receipt_time() -> float:
+            if now is not None:
+                return float(now)
+            return time.time()
+
         try:
             listing = self._listing()
+            listing_received_at = receipt_time()
             # Listing values are a legitimate live observation. Detail fetches are
             # bounded and rotated across the durable 64-token state. This avoids
             # turning a failed endpoint into an unbounded sequential network loop.
             by_mint = {str(coin["mint"]): coin for coin in listing}
+            coin_received_at = {str(coin["mint"]): listing_received_at for coin in listing}
             bounded_tracked = tracked_mints[: self.max_tracked]
             if bounded_tracked:
                 start = self._tracked_cursor % len(bounded_tracked)
@@ -330,6 +389,7 @@ class PumpFunSource:
                 self._tracked_cursor = (start + len(selected)) % len(bounded_tracked)
             else:
                 selected = []
+            refreshed_tracked: list[dict[str, Any]] = []
             for mint in selected:
                 try:
                     detail = self._coin(mint)
@@ -337,23 +397,53 @@ class PumpFunSource:
                     # Do not make one stale token conceal a successful listing batch.
                     continue
                 if detail.get("mint"):
-                    by_mint[str(detail["mint"])] = detail
+                    detail_mint = str(detail["mint"])
+                    by_mint[detail_mint] = detail
+                    coin_received_at[detail_mint] = receipt_time()
+                    refreshed_tracked.append(detail)
             # Reserve progress for this poll. A failed batch leaves the map empty
             # and every row curve_known false; prices are still recorded.
             accounts_by_curve = self._reserve_accounts(list(by_mint.values()))
+            # A parsed reserve is compound data: it cannot be labelled earlier than
+            # the reserve response even when its listing/detail price arrived first.
+            reserve_received_at = receipt_time() if accounts_by_curve else None
+            all_coins = list(by_mint.values())[: self.max_listing + self.max_tracked]
+            refreshed_mints = {str(coin.get("mint")) for coin in refreshed_tracked if coin.get("mint")}
+            listing_candidates = [coin for coin in listing if str(coin.get("mint")) not in refreshed_mints]
+            retained_mints = set(bounded_tracked) | {str(coin.get("mint")) for coin in listing}
+            self._holder_attempts = {
+                mint: sequence for mint, sequence in self._holder_attempts.items()
+                if mint in retained_mints
+            }
+            priority = self._holder_priority(listing_candidates, refreshed_tracked)
+            cache = getattr(self.holder_cache, "cache", {})
+            holder_now = receipt_time()
+            holder_check_mints: set[str] = set()
+            for coin in priority:
+                mint = str(coin.get("mint") or "")
+                cached = cache.get(mint) if isinstance(cache, dict) else None
+                if not mint or (cached and cached[0] > holder_now):
+                    continue
+                if self._market_cap(coin) <= 0 or coin.get("complete"):
+                    continue
+                holder_check_mints.add(mint)
+                if len(holder_check_mints) >= self.max_holder_checks:
+                    break
             observations: list[dict[str, Any]] = []
             holder_checks = 0
-            for coin in list(by_mint.values())[: self.max_listing + self.max_tracked]:
+            for coin in all_coins:
                 market_cap = self._market_cap(coin)
                 if market_cap <= 0 or coin.get("complete"):
                     continue
                 mint = str(coin["mint"])
-                cached = self.holder_cache.cache.get(mint)
-                if cached and cached[0] > now:
+                cached = cache.get(mint) if isinstance(cache, dict) else None
+                if cached and cached[0] > holder_now:
                     risk = dict(cached[1])
-                elif holder_checks < self.max_holder_checks:
+                elif mint in holder_check_mints and holder_checks < self.max_holder_checks:
                     holder_checks += 1
-                    risk = self.holder_cache.get(coin, now)
+                    self._holder_attempt_sequence += 1
+                    self._holder_attempts[mint] = self._holder_attempt_sequence
+                    risk = self.holder_cache.get(coin, holder_now)
                 else:
                     # This is deliberately not a zero concentration. The policy
                     # records and conservatively skips it until a later poll checks it.
@@ -365,11 +455,14 @@ class PumpFunSource:
                 address = self._curve_address(coin)
                 parsed = accounts_by_curve.get(address)
                 known = parsed is not None
+                observed_at = coin_received_at.get(mint, listing_received_at)
+                if known and reserve_received_at is not None:
+                    observed_at = max(observed_at, reserve_received_at)
                 observation: dict[str, Any] = {
                     "mint": mint,
                     "symbol": str(coin.get("symbol") or "?")[:32],
                     "name": str(coin.get("name") or "")[:120],
-                    "observed_at": now,
+                    "observed_at": observed_at,
                     "market_cap": round(market_cap, 6),
                     # Unknown reserves stay numeric for the NOT NULL column and are
                     # flagged so the 25–85% band cannot treat 0 as a real print.

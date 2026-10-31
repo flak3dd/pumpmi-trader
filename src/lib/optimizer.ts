@@ -11,6 +11,14 @@ export type OptimizerStatus = {
   nextReview: number | null;
   bootId: string;
   leaseOwned: boolean;
+  entryReadiness?: {
+    pending: number;
+    holderUnknown: number;
+    curveUnknown: number;
+    overdue: number;
+    expiredTotal: number;
+    blocker: string | null;
+  };
   source: {
     name: string;
     lastObservation: number | null;
