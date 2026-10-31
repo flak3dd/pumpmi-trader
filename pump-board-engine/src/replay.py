@@ -137,7 +137,7 @@ def report(fills: list[dict], history: list[dict], strat: dict | None = None) ->
         "rejected_gross_pnl": round(rejected_gross, 2),
         "similarity": similarity_replay(history, strat),
         "not_replayable": [
-            "on-chain swap tape (buyers, imbalance, top buyer)",
+            "on-chain swap tape (buyers, imbalance, top buyer, top-3 share, meaningful buyers)",
             "reserve-delta acceleration across the three watch windows",
             "holder concentration when the ledger stored nulls",
             "intrabar emergency and volatility stops without a price path",

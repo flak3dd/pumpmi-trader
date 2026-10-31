@@ -10,6 +10,9 @@ v8 expected-edge revision (not a profitability claim):
   M4 similarity boost needs >=30 prior exits, is capped at 1.5x, and ignores future rows.
   L1 missing holder/dev/cluster reads skip. L2 curve progress is reserve-based.
   L3 signal strength sizes inside the $130–160 band (loss-streak halving still applies after).
+  D1 top-3 buyers above 45% of buy SOL skip. The 20% single-wallet cap still applies.
+  D2 fewer than 8 buyers of at least 0.05 SOL skip; the 70–85% curve band requires 12.
+  Both distribution terms also scale size inside the same $130–160 band. Fees stay 100 bps.
 """
 import base64
 import json
@@ -41,6 +44,8 @@ STRAT = dict(
     p0_top10_max=30, p0_dev_max=5, p0_bundle_max=25,
     watch_short_s=90, watch_medium_s=180, watch_long_s=300, rescan_s=180,
     flow_min_buyers=15, flow_strong_buyers=25, flow_min_bs_ratio=1.3, flow_max_whale_pct=20,
+    flow_max_top3_pct=45, flow_meaningful_sol=0.05, flow_min_meaningful_buyers=8,
+    flow_strong_meaningful_buyers=12,
     flow_sig_limit=25, flow_slice_dust_sol=0.01, flow_exit_dust_sol=0.05, flow_exit_giveback=0.25,
     p3_min_sentiment=50, p3_min_mentions=100,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
@@ -310,7 +315,7 @@ class Feed:
                 trades.append(trade)
         if results and missing * 2 > len(results):
             return None
-        return summarize(trades)
+        return summarize(trades, meaningful_sol=float(self.strategy["flow_meaningful_sol"]))
 
     def holders(self, coin):
         try:
@@ -471,7 +476,10 @@ class Feed:
             mention_volume=social_values.get("mention_volume") if sentiment_buy else None,
             sentiment_buy=sentiment_buy, age_s=round(time.time() - created / 1000) if created else None,
             flow_buyers=flow["unique_buyers"], flow_signed_sol=round(flow["signed_quote_sol"], 4),
-            flow_top_buyer_pct=round(flow["top_buyer_pct"], 2), signal_strength=round(strength, 3),
+            flow_top_buyer_pct=round(flow["top_buyer_pct"], 2),
+            flow_top3_buyer_pct=round(float(flow["top3_buyer_pct"]), 2),
+            flow_meaningful_buyers=int(flow["meaningful_buyers"]),
+            signal_strength=round(strength, 3),
         )
         boost = False
         trail = rules["trail_giveback_pct"]
@@ -793,7 +801,9 @@ def main():
     feed = Feed(cfg)
     stop_delay = feed.strategy["pos_check_s"]
     signal.signal(signal.SIGTERM, lambda *args: (_ for _ in ()).throw(SystemExit))
-    feed.ev(f"feed start PAPER strategy v8, position check {stop_delay}s, lunarcrush={feed.lc.mode}")
+    feed.ev(
+        f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, lunarcrush={feed.lc.mode}"
+    )
     while True:
         try:
             feed.cycle()
