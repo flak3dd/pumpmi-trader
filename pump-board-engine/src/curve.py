@@ -27,21 +27,28 @@ def parse_curve_account(data: bytes) -> dict | None:
     """Parse the leading reserve words of a pump bonding-curve account.
 
     Layout (after the 8-byte discriminator): virtual token, virtual SOL lamports,
-    real token, real SOL lamports. Later bytes (completion flag, creator) are ignored;
-    graduation is taken from the coin payload's ``complete`` flag.
+    real token, real SOL lamports, then total supply and a completion byte when
+    the account is long enough. Creator bytes are not read here.
     """
     if not data or len(data) < 40:
         return None
     virtual_token, virtual_sol, real_token, real_sol = struct.unpack_from("<QQQQ", data, 8)
     if virtual_token <= 0 or virtual_sol <= 0:
         return None
-    return {
+    parsed = {
         "virtual_token": int(virtual_token),
         "virtual_sol": int(virtual_sol),
         "real_token": int(real_token),
         "real_sol": int(real_sol),
         "curve_pct": round(curve_progress_pct(real_token), 2),
     }
+    if len(data) >= 48:
+        (supply,) = struct.unpack_from("<Q", data, 40)
+        if supply > 0:
+            parsed["token_supply"] = int(supply)
+    if len(data) >= 49:
+        parsed["complete"] = bool(data[48])
+    return parsed
 
 
 # Pump.fun standard: 1e9 tokens at 6 decimals. Used only to imply a paper SOL price
