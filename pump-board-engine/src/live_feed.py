@@ -30,7 +30,6 @@ import json
 import os
 import time
 import signal
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .config import load
@@ -49,8 +48,14 @@ from .flow import (
     unavailable_tape_fallback,
 )
 from .exits import emergency_drop, failed_impulse_hit, net_change_pct, vol_stop_hit, vol_stop_pct, profit_lock_hit
+from .market_scan import (
+    GECKO_HEADERS,
+    apply_account_meta,
+    coins_from_listing,
+    listing_url,
+    mcap_from_reserves,
+)
 
-PF = "https://frontend-api-v3.pump.fun"
 RPC = "https://api.mainnet-beta.solana.com"
 UA = {"User-Agent": "Mozilla/5.0 (PumpBoardEngine paper)", "Accept": "application/json"}
 STRAT = dict(
@@ -76,11 +81,13 @@ STRAT = dict(
 )
 
 
-def http(url, body=None, timeout=12):
+def http(url, body=None, timeout=12, headers=None):
     import urllib.request
     data = json.dumps(body).encode() if body is not None else None
-    headers = {**UA, **({"Content-Type": "application/json"} if body is not None else {})}
-    request = urllib.request.Request(url, data=data, headers=headers)
+    merged = {**UA, **(headers or {})}
+    if body is not None:
+        merged.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(url, data=data, headers=merged)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
@@ -116,6 +123,9 @@ class Feed:
         self.strategy = effective_strategy(STRAT, strategy_config_path)
         self.next_scan = 0.0
         self.last_pos_check = 0.0
+        self.sol_usd = None
+        self._listing_page = 1
+        self._listed_once = False
         self.restore()
 
     def refresh_strategy(self):
@@ -288,25 +298,47 @@ class Feed:
                 found[address] = parsed
         return found
 
-    def marks_for(self, mints):
-        """Parallel public mcap reads. A failed mint is omitted; it does not fail the others."""
-        mints = [mint for mint in mints if mint]
-        if not mints:
+    def _accounts(self, addresses):
+        """One getMultipleAccounts read. None when the RPC call itself fails."""
+        addresses = [address for address in addresses if address]
+        if not addresses:
             return {}
-
-        def one(mint):
+        try:
+            payload = self._rpc("getMultipleAccounts", [addresses, {"encoding": "base64", "commitment": "confirmed"}])
+        except Exception:
+            return None
+        values = ((payload or {}).get("result") or {}).get("value") if isinstance(payload, dict) else None
+        if not isinstance(values, list):
+            return None
+        found = {}
+        for address, value in zip(addresses, values):
+            if not isinstance(value, dict) or not value.get("data"):
+                continue
+            raw = value["data"]
             try:
-                payload = http(f"{PF}/coins-v2/{mint}")
-                spot = float(payload.get("usd_market_cap") or 0)
-                quote = float(payload.get("market_cap_quote") or 0)
-                sol_px = spot / quote if spot and quote else 0.0
-                return mint, {"spot": spot, "sol_px": sol_px}
+                blob = base64.b64decode(raw[0] if isinstance(raw, list) else raw)
             except Exception:
-                return mint, None
+                continue
+            found[address] = {"owner": value.get("owner"), "data": blob}
+        return found
 
-        workers = min(8, len(mints))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            return {mint: snap for mint, snap in pool.map(one, mints) if snap and snap.get("spot")}
+    def _enrich_coins(self, coins):
+        """Attach on-chain creator, supply, and the curve token account. Gates stay fail-closed."""
+        addresses = []
+        for coin in coins:
+            for key in ("bonding_curve", "mint"):
+                value = coin.get(key)
+                if value and value not in addresses:
+                    addresses.append(value)
+        accounts = self._accounts(addresses)
+        if accounts is None:
+            return list(coins)
+        enriched = []
+        for coin in coins:
+            updated = apply_account_meta(coin, accounts)
+            if updated is not None:
+                enriched.append(updated)
+        return enriched
 
     @staticmethod
     def _last_window_start(watch: dict) -> float | None:
@@ -480,7 +512,7 @@ class Feed:
             started = time.time()
             watch = dict(
                 t=started, curve=curve, baseline_curve=curve, key=key, real_sol=state["real_sol"],
-                watch_periods=periods,
+                watch_periods=periods, coin=dict(coin),
             )
             self.watch[mint] = watch
             self.board.put(
@@ -636,6 +668,7 @@ class Feed:
             scaled=False, boost=boost, trail_giveback_pct=trail, sentiment=feat["sentiment_0_100"], feat=feat,
             tokens=filled["tokens"], fee_bps=rules["curve_fee_bps"], curve_addr=coin.get("bonding_curve"),
             entry_real_sol=state["real_sol"], entry_flow_sol=sum(slices), entry_usd=usd, sol_px=sol_px,
+            supply_raw=state.get("token_supply") or coin.get("total_supply"),
             scaled_pnl=0.0, rets=[], be_armed=False,
         )
         SIM.append({
@@ -671,18 +704,24 @@ class Feed:
             ]
             if not due:
                 continue
-            try:
-                coin = http(f"{PF}/coins-v2/{mint}")
-            except Exception as exc:
-                self.ev(f"recheck {watch['key']} fetch failed {type(exc).__name__}")
-                continue
-            if coin.get("complete"):
-                self.watch.pop(mint, None)
+            coin = dict(watch.get("coin") or {})
+            if not coin.get("mint"):
+                self.ev(f"recheck {watch['key']} coin metadata missing")
                 continue
             state = self.curve_state(coin)
             if not state:
                 self.ev(f"recheck {watch['key']} curve reserves unavailable")
                 continue
+            if state.get("complete"):
+                self.watch.pop(mint, None)
+                continue
+            priced = mcap_from_reserves(
+                self.sol_usd, state.get("virtual_sol"), state.get("virtual_token"),
+                state.get("token_supply") or coin.get("total_supply"),
+            )
+            if priced:
+                coin["usd_market_cap"], coin["market_cap_quote"] = priced
+            watch["coin"] = dict(coin)
             # One reading cannot prove three windows. Observe a single due tier per fetch.
             tier = due[0]
             periods[tier].update(
@@ -840,25 +879,31 @@ class Feed:
             self.close(key, spot, f"time exit {rules['hard_exit_s'] // 60}m {net:+.0f}%", exit_eff=exit_price)
 
     def manage_fast(self):
-        """Mark every open paper position. Prices are fetched together; reserves are one RPC batch."""
+        """Mark every open paper position from curve reserves and the latest SOL quote.
+
+        The quote comes from the public pool listing. A missing quote or a missing
+        curve account skips the mark instead of inventing a price.
+        """
         self.last_pos_check = time.time()
         self.stats["pos_checks"] += 1
         if not self.pos:
             return
         keys = list(self.pos)
-        marks = self.marks_for([self.pos[key]["mint"] for key in keys])
         curves = self.curves_for([self.pos[key].get("curve_addr") for key in keys])
         for key in keys:
             if key not in self.pos:
                 continue
             position = self.pos[key]
-            mark = marks.get(position.get("mint")) or {}
             curve = curves.get(position.get("curve_addr")) or {}
-            if not mark.get("spot"):
+            priced = mcap_from_reserves(
+                self.sol_usd, curve.get("virtual_sol"), curve.get("virtual_token"),
+                curve.get("token_supply") or position.get("supply_raw"),
+            )
+            if not priced:
                 continue
             self.apply_mark(key, {
-                "spot": mark["spot"],
-                "sol_px": mark.get("sol_px") or 0,
+                "spot": priced[0],
+                "sol_px": self.sol_usd or 0,
                 "virtual_sol": curve.get("virtual_sol"),
                 "virtual_token": curve.get("virtual_token"),
                 "real_sol": curve.get("real_sol"),
@@ -892,6 +937,7 @@ class Feed:
         state = self.board.state(self.equity(), self.bank, "paper")
         state.update(
             source="LIVE MARKET DATA · PAPER TRADES",
+            listing="geckoterminal pump-fun pools",
             stats={**self.stats, "realized": round(self.stats["realized"], 2)},
             log=self.log, lunarcrush=self.lc.mode, updated=time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         )
@@ -923,12 +969,25 @@ class Feed:
         temporary.replace(out / "trade_charts.json")
 
     def scan(self):
+        """One public pump-fun pool page, then the same on-chain curve and holder gates.
+
+        frontend-api-v3.pump.fun answers this client with HTTP 403 (Cloudflare
+        challenge), so the listing is GeckoTerminal's pump-fun pools. Those pool
+        addresses are the bonding-curve accounts. Pages alternate so a scan stays
+        inside the public ~10 requests/minute budget.
+        """
         self.stats["ticks"] += 1
-        coins = http(f"{PF}/coins?offset=0&limit=30&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
-        try:
-            coins += http(f"{PF}/coins?offset=0&limit=30&sort=market_cap&order=DESC&includeNsfw=false")
-        except Exception:
-            pass
+        page = self._listing_page
+        self._listing_page = 1 if page >= 2 else page + 1
+        payload = http(listing_url(page), headers=GECKO_HEADERS, timeout=12)
+        coins, sol_usd = coins_from_listing(payload)
+        if sol_usd:
+            self.sol_usd = sol_usd
+        coins = self._enrich_coins(coins)
+        if not self._listed_once:
+            self._listed_once = True
+            shown = f"{self.sol_usd:.2f}" if self.sol_usd else "unknown"
+            self.ev(f"scan ok {len(coins)} pump-fun pools via geckoterminal (sol ${shown})")
         now = time.time()
         fresh = [
             coin for coin in coins
@@ -948,12 +1007,15 @@ class Feed:
         self.manage_fast()
         scanned = False
         if now >= self.next_scan:
+            delay = float(self.strategy["scan_s"])
             try:
                 self.scan()
                 scanned = True
             except Exception as exc:
                 self.ev(f"scan error {type(exc).__name__}: {str(exc)[:120]}")
-            self.next_scan = now + float(self.strategy["scan_s"])
+                if getattr(exc, "code", None) == 429:
+                    delay = max(delay, 60.0)
+            self.next_scan = now + delay
         self.write()
         return scanned
 
@@ -978,7 +1040,8 @@ def main():
         stop_delay = feed.strategy["pos_check_s"]
         signal.signal(signal.SIGTERM, lambda *args: (_ for _ in ()).throw(SystemExit))
         feed.ev(
-            f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, lunarcrush={feed.lc.mode}"
+            f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, "
+            f"lunarcrush={feed.lc.mode}, listing=geckoterminal pump-fun pools"
         )
         while True:
             try:
