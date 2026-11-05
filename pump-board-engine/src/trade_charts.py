@@ -21,7 +21,13 @@ def split_top(s):
 def gates_buy(r):
     g = []
     m = re.match(r"^(v\d+) PASS:\s*(.*)$", r)
-    if m: g.append({"name": f"{m.group(1)} checklist", "detail": "all hard gates passed", "pass": True}); r = m.group(2)
+    if m:
+        body = m.group(2) or ""
+        # A rate-limited holder read is a sized-down entry, not a measured concentration pass.
+        measured = "unverified" not in body
+        detail = "all hard gates passed" if measured else "paper entry; holder concentration was not measured"
+        g.append({"name": f"{m.group(1)} checklist", "detail": detail, "pass": measured})
+        r = body
     for p in split_top(r):
         if p.startswith("curve"):
             mm = re.search(r"([\d.]+)->([\d.]+)%", p)
@@ -33,9 +39,11 @@ def gates_buy(r):
         elif re.match(r"\d+ mentions", p):
             g.append({"name": "P3 mentions", "detail": p, "pass": True})
         elif p.startswith("top10"):
-            g.append({"name": "Holders top10", "detail": p.replace("None%", "n/a (not blocking)"), "pass": True})
+            unverified = "unverified" in p
+            g.append({"name": "Holders top10", "detail": p.replace("None%", "n/a (not blocking)"), "pass": not unverified})
         elif p.startswith("dev"):
-            g.append({"name": "Dev wallet", "detail": p.replace("None%", "n/a (not blocking)"), "pass": True})
+            unverified = "unverified" in p
+            g.append({"name": "Dev wallet", "detail": p.replace("None%", "n/a (not blocking)"), "pass": not unverified})
         elif p.startswith("v7 SIM") or p.startswith("v6 SIM"):
             g.append({"name": "Similarity gate", "detail": p, "pass": "skip" not in p.lower()})
         else:

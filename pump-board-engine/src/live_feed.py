@@ -7,11 +7,17 @@ v8 expected-edge revision (not a profitability claim):
   H2 position checks every ~2.5s before coin scans; parallel marks; 10% one-check emergency exit.
   H3 paper fills include the fee and, when reserves are known, bonding-curve impact.
   M1 each watch window's SOL per second must rise; a longer window is not acceleration. Material post-entry SOL outflow exits.
-  M2 curve band 30–70%, or 70–85% only with stronger buyer breadth. Above 85% skips.
+  M2 hard curve floor is 2%, so the GeckoTerminal fresh-pool mass is not rejected on the band.
+     2–30% is the early band at a smaller size. Above 85% still skips. 70–85% still needs buyer breadth.
+  S1 LunarCrush is a primary buy weight, not only a veto. Strong means sentiment >= 65, mentions >= 150, trend not down.
+     Strong sentiment removes the early-curve and missing-holder size cuts and can lift a clean ticket from $130 to $160.
+     A missing, fixture, or rate-limited reading keeps the smaller size. It does not qualify. High-mention weak sentiment still skips.
   M3 volatility can tighten the stop on the spot move, not the fee-inclusive net, and not past -15%. +15% net arms fee-inclusive break-even.
   H4 top-10 and top-5 drop the known curve token account. The largest balance is not treated as the curve, so a whale that outsizes it still counts. A missing curve account skips.
   M4 similarity boost needs >=30 prior exits, is capped at 1.5x, and ignores future rows.
-  L1 missing holder/dev/cluster reads skip. L2 curve progress is reserve-based.
+  L1 an unreadable holder payload still skips. A rate limit or timeout does not invent percents:
+     the coin can still enter at holder_gap_size_mult, strong sentiment can clear that cut, and a later real over-cap reading still skips.
+  L2 curve progress is reserve-based.
   L3 signal strength sizes inside the $130–160 band (loss-streak halving still applies after).
   D1 top-3 buyers above 45% of buy SOL skip. The 20% single-wallet cap still applies.
   D2 fewer than 8 buyers of at least 0.05 SOL skip; the 70–85% curve band requires 12.
@@ -40,7 +46,10 @@ from .aggregators.fuse import fuse, PLATFORMS
 from .ledger import Ledger
 from . import similarity as SIM
 from .kanban_state import Board
-from .holders import concentration, curve_token_accounts, largest_account_rows
+from .holders import (
+    concentration, curve_token_accounts, largest_account_rows,
+    rpc_failure_kind, rpc_payload_kind,
+)
 from .curve import parse_curve_account, buy_fill, sell_eff, flat_round_trip_pct, size_for_curve_depth, sol_price_usd
 from .flow import (
     summarize, trade_from_tx, flow_allows, accelerating, flow_reversed,
@@ -59,8 +68,9 @@ from .market_scan import (
 RPC = "https://api.mainnet-beta.solana.com"
 UA = {"User-Agent": "Mozilla/5.0 (PumpBoardEngine paper)", "Accept": "application/json"}
 STRAT = dict(
-    min_curve_pct=30, max_curve_pct=85, curve_breadth_from_pct=70, max_mcap_usd=250_000,
-    p0_top10_max=30, p0_dev_max=5, p0_bundle_max=25,
+    min_curve_pct=2, max_curve_pct=85, curve_breadth_from_pct=70, early_curve_pct=30,
+    early_curve_size_mult=0.45, max_mcap_usd=250_000,
+    p0_top10_max=30, p0_dev_max=5, p0_bundle_max=25, holder_gap_size_mult=0.65,
     watch_short_s=90, watch_medium_s=180, watch_long_s=300, rescan_s=180,
     flow_min_buyers=15, flow_strong_buyers=25, flow_min_bs_ratio=1.3, flow_max_whale_pct=20,
     flow_max_top3_pct=45, flow_meaningful_sol=0.05, flow_min_meaningful_buyers=8,
@@ -70,6 +80,8 @@ STRAT = dict(
     flow_last_window_max_seller_pct=60, flow_last_window_min_sell_sol=0.15,
     flow_max_round_trip_pct=50, flow_fallback_rise_pts=3, impact_max_drag_pct=-10, impact_size_budget_pct=-4,
     p3_min_sentiment=50, p3_min_mentions=100,
+    p3_strong_sentiment=65, p3_strong_mentions=150,
+    sentiment_border_size_mult=1.0, sentiment_size_weight=1.0,
     size_pct_equity=1.5, size_min=130, size_max=160, max_open=6, loss_streak_halve=3,
     curve_fee_bps=100, pos_check_s=2.5, scan_s=10, emergency_drop_pct=10,
     stop_loss_pct=-15, vol_stop_floor_pct=4, vol_stop_mult=2, vol_stop_min_samples=4, be_arm_pct=15,
@@ -79,6 +91,50 @@ STRAT = dict(
     hard_exit_s=2400, flatten_curve_pct=95,
     v6_size_mult=1.5, v6_trail_relax=1.20, v6_min_hist=30, v7_boost_eq_pct=8, v7_boost_usd_max=500,
 )
+
+
+def public_sentiment_tier(snap, rules) -> str:
+    """``strong``, ``neutral``, ``veto``, or ``missing`` from one already-fetched snapshot.
+
+    ``strong`` is the buy signal: enough mentions, sentiment at the higher bar, and
+    the topic is not trending down. ``veto`` is the old high-mention weak reading.
+    Anything absent, non-numeric, or too thin to judge is ``missing``. Missing is
+    not a pass and it is not a zero score.
+    """
+    if not isinstance(snap, dict):
+        return "missing"
+    mentions = snap.get("mention_volume")
+    score = snap.get("sentiment_0_100")
+    if isinstance(mentions, bool) or isinstance(score, bool):
+        return "missing"
+    try:
+        mentions_n = float(mentions)
+        score_n = float(score)
+    except (TypeError, ValueError):
+        return "missing"
+    if mentions_n != mentions_n or score_n != score_n:
+        return "missing"
+    if mentions_n < float(rules["p3_min_mentions"]) or score_n < 0 or score_n > 100:
+        return "missing"
+    if score_n < float(rules["p3_min_sentiment"]):
+        return "veto"
+    trend = str(snap.get("trend") or "flat").strip().lower()
+    if (
+        mentions_n >= float(rules["p3_strong_mentions"])
+        and score_n >= float(rules["p3_strong_sentiment"])
+        and trend != "down"
+    ):
+        return "strong"
+    return "neutral"
+
+
+def sentiment_size_margin(score, rules) -> float:
+    """Share of the $130–160 span a strong reading adds. Half at the strong bar, all of it at 100."""
+    span = 100.0 - float(rules["p3_strong_sentiment"])
+    if span <= 0:
+        return 1.0
+    frac = (float(score) - float(rules["p3_strong_sentiment"])) / span
+    return max(0.0, min(1.0, 0.5 + 0.5 * frac))
 
 
 def http(url, body=None, timeout=12, headers=None):
@@ -412,40 +468,136 @@ class Feed:
         return with_last_window(summary, trades, last_window_ts)
 
     def holders(self, coin):
-        """Top-1 / top-5 / top-10 percents with the known curve token account removed.
+        """Holder snapshot with the known curve token account removed.
 
-        A missing curve address, or a curve address that is not in the largest
-        accounts, is unavailable. The previous code dropped whichever balance
-        was largest and could therefore delete the whale and keep the curve.
+        ``status`` is ``known`` only when supply and the curve account are both
+        real. ``transient`` is a rate limit or timeout: percents are omitted, not
+        zeroed. ``corrupt`` is an unreadable body or a curve account that is not
+        in the largest-account list. Callers skip that case. The largest balance
+        is never assumed to be the curve.
         """
         try:
             payload = self._rpc("getTokenLargestAccounts", [coin["mint"], {"commitment": "confirmed"}])
+        except Exception as exc:
+            kind = rpc_failure_kind(exc)
+            return {
+                "status": kind,
+                "reason": "holder RPC unavailable" if kind == "transient" else "P0 holder data missing",
+            }
+        kind = rpc_payload_kind(payload)
+        if kind:
+            return {
+                "status": kind,
+                "reason": "holder RPC unavailable" if kind == "transient" else "P0 holder data missing",
+            }
+        try:
             parsed = largest_account_rows((payload.get("result") or {}).get("value"))
             supply = float(coin.get("total_supply") or 0) / 10 ** int(coin.get("base_decimals", 6))
             stats = concentration(parsed or [], supply, curve_token_accounts(coin))
-            if stats is None or supply <= 0:
-                return None, None, None, None
-            return (*stats, supply)
         except Exception:
-            return None, None, None, None
+            return {"status": "corrupt", "reason": "P0 holder data missing"}
+        if stats is None or supply <= 0:
+            return {"status": "corrupt", "reason": "P0 holder data missing"}
+        top, bundle, top10 = stats
+        return {
+            "status": "known", "top": top, "bundle": bundle, "top10": top10,
+            "supply": supply, "reason": None,
+        }
 
     def dev_pct(self, coin, supply):
-        """Creator token balance as % of supply. None if it cannot be read."""
+        """Creator token balance as % of supply. None if it cannot be read.
+
+        Sets ``_dev_failure`` to ``transient`` or ``corrupt`` when the result is
+        None, so a timeout is not stored as a 0% developer. A mock that returns
+        a number never has to set the flag.
+        """
+        self._dev_failure = None
         try:
             if not coin.get("creator") or not supply:
+                self._dev_failure = "corrupt"
                 return None
             payload = self._rpc("getTokenAccountsByOwner", [
                 coin["creator"], {"mint": coin["mint"]}, {"encoding": "jsonParsed", "commitment": "confirmed"},
             ])
+            kind = rpc_payload_kind(payload)
+            if kind:
+                self._dev_failure = kind
+                return None
             amount = sum(
                 float(account["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"] or 0)
                 for account in payload["result"]["value"]
             )
             return round(100 * amount / supply, 2)
-        except Exception:
+        except Exception as exc:
+            self._dev_failure = rpc_failure_kind(exc)
             return None
 
+    @staticmethod
+    def _holder_fields(raw):
+        """Accept the snapshot dict or the older ``(top, bundle, top10, supply)`` tuple.
+
+        A tuple with any missing percent is corrupt. Tests and a caller that
+        already measured concentration keep working. Nothing here fills a gap with 0.
+        """
+        if isinstance(raw, dict) and raw.get("status") in ("known", "transient", "corrupt"):
+            return raw
+        if isinstance(raw, tuple) and len(raw) == 4:
+            top, bundle, top10, supply = raw
+            if top10 is None or bundle is None or supply is None:
+                return {
+                    "status": "corrupt", "reason": "P0 holder data missing",
+                    "top": top, "bundle": bundle, "top10": top10, "supply": supply,
+                }
+            return {
+                "status": "known", "reason": None,
+                "top": top, "bundle": bundle, "top10": top10, "supply": supply,
+            }
+        return {"status": "corrupt", "reason": "P0 holder data missing"}
+
+    def holder_verdict(self, coin):
+        """``(clear|gap|skip, reason, fields)``.
+
+        A measured top-10, developer, or top-5 over its cap skips. An unreadable
+        payload skips. A rate limit or timeout is a gap: the missing percents
+        stay missing, and the entry size is cut later. Denial is not a pass.
+        """
+        rules = self.strategy
+        snap = self._holder_fields(self.holders(coin))
+        top10 = snap.get("top10")
+        bundle = snap.get("bundle")
+        supply = snap.get("supply")
+        if snap.get("status") == "corrupt":
+            return "skip", "P0 holder data missing", snap
+        if snap.get("status") == "known":
+            if top10 is None or bundle is None or not supply:
+                return "skip", "P0 holder data missing", snap
+            if top10 > rules["p0_top10_max"]:
+                return "skip", f"P0 top10 {top10}% > {rules['p0_top10_max']}%", snap
+            self._dev_failure = None
+            dev = self.dev_pct(coin, supply)
+            fields = {**snap, "dev": dev}
+            if dev is None:
+                # A real top-5 reading still vetoes. A missing dev does not become 0%.
+                if bundle > rules["p0_bundle_max"]:
+                    return "skip", f"P0 top-5 cluster {bundle}% > {rules['p0_bundle_max']}%", fields
+                if getattr(self, "_dev_failure", None) == "transient":
+                    return "gap", "holders unverified (RPC unavailable)", fields
+                return "skip", "P0 holder data missing", fields
+            if dev > rules["p0_dev_max"]:
+                return "skip", f"P0 dev {dev}% > {rules['p0_dev_max']}%", fields
+            if bundle > rules["p0_bundle_max"]:
+                return "skip", f"P0 top-5 cluster {bundle}% > {rules['p0_bundle_max']}%", fields
+            return "clear", None, fields
+        return "gap", "holders unverified (RPC unavailable)", snap
+
     def social(self, symbol):
+        """Live LunarCrush snapshot, ``RATE``, or None.
+
+        Fixture mode is not a public reading. A canned topic must not qualify a
+        borderline curve or lift a size cut.
+        """
+        if getattr(self.lc, "mode", None) != "live":
+            return None
         if symbol in self.lc_cache:
             return self.lc_cache[symbol]
         if time.time() < self.lc_backoff:
@@ -484,42 +636,44 @@ class Feed:
         if not state:
             return self.skip(key, "curve reserves unavailable", False, coin)
         curve = state["curve_pct"]
+        # 2% keeps the untouched 0–2% launches out. The rest of the fresh-pool mass is in band
+        # and is sized by sentiment instead of being rejected here.
         if not (rules["min_curve_pct"] <= curve <= rules["max_curve_pct"] and mcap <= rules["max_mcap_usd"]):
             return self.skip(
                 key,
                 f"P1 curve {curve}% not in {rules['min_curve_pct']}-{rules['max_curve_pct']}% / mcap ${mcap:,.0f}",
                 False, coin,
             )
-        top, bundle, top10, supply = self.holders(coin)
-        dev = self.dev_pct(coin, supply)
+        verdict, holder_reason, fields = self.holder_verdict(coin)
+        top = fields.get("top")
+        bundle = fields.get("bundle")
+        top10 = fields.get("top10")
+        dev = fields.get("dev")
+        supply = fields.get("supply")
+        holder_gap = verdict == "gap"
         old = self.board.cards.get(key)
         seen = old["ts_seen"] if old and "ts_seen" in old else time.time()
         self.board.put(
             key, "checking", mint=mint, name=coin.get("name"), mcap=round(mcap), curve_pct=curve,
             top1_pct=top, top10_pct=top10, dev_pct=dev, bundle_pct=bundle, replies=replies, ts_seen=seen,
         )
-        if top10 is None or dev is None or bundle is None:
-            return self.skip(key, "P0 holder data missing", False, coin)
-        if top10 > rules["p0_top10_max"]:
-            return self.skip(key, f"P0 top10 {top10}% > {rules['p0_top10_max']}%", False, coin)
-        if dev > rules["p0_dev_max"]:
-            return self.skip(key, f"P0 dev {dev}% > {rules['p0_dev_max']}%", False, coin)
-        if bundle > rules["p0_bundle_max"]:
-            return self.skip(key, f"P0 top-5 cluster {bundle}% > {rules['p0_bundle_max']}%", False, coin)
+        if verdict == "skip":
+            return self.skip(key, holder_reason, False, coin)
         watch = self.watch.get(mint)
         if watch is None:
             periods = self._new_watch_periods()
             started = time.time()
             watch = dict(
                 t=started, curve=curve, baseline_curve=curve, key=key, real_sol=state["real_sol"],
-                watch_periods=periods, coin=dict(coin),
+                watch_periods=periods, coin=dict(coin), holder_gap=holder_gap,
             )
             self.watch[mint] = watch
             self.board.put(
                 key, "checking", reason=self._watch_reason(watch), watch_started_ts=started,
                 watch_periods=self._copy_watch_periods(periods),
             )
-            self.ev(f"WATCH {key} curve {curve}% ({self._watch_reason(watch)})")
+            gap_note = " holders unverified, retrying" if holder_gap else ""
+            self.ev(f"WATCH {key} curve {curve}%{gap_note} ({self._watch_reason(watch)})")
             return
         long_duration = watch["watch_periods"]["long"]["duration_s"]
         if time.time() - watch["t"] < long_duration or not self._watch_complete(watch):
@@ -559,16 +713,20 @@ class Feed:
                 return self.skip(key, late_why, False, coin)
             strength = signal_strength(flow, slices, rules, strong=strong, durations=durations)
         snap = self.social(symbol)
-        half = False
-        if snap == "RATE":
+        half = snap == "RATE"
+        if half:
             snap = None
-            half = True
-        if snap is not None and snap["mention_volume"] >= rules["p3_min_mentions"]:
-            if snap["sentiment_0_100"] < rules["p3_min_sentiment"]:
-                return self.skip(key, f"P3 sentiment {snap['sentiment_0_100']}/100", False, coin)
-            social_why = f"social {snap['sentiment_0_100']}/100"
+        sentiment_tier = "missing" if half else public_sentiment_tier(snap, rules)
+        if sentiment_tier == "veto":
+            return self.skip(key, f"P3 sentiment {snap['sentiment_0_100']}/100", False, coin)
+        if sentiment_tier == "strong":
+            social_why = f"social buy {snap['sentiment_0_100']}/100, {int(snap['mention_volume'])} mentions"
+        elif sentiment_tier == "neutral":
+            social_why = f"social {snap['sentiment_0_100']}/100 below strong bar"
+        elif half:
+            social_why = "LunarCrush rate-limited -> half size"
         else:
-            social_why = "LunarCrush rate-limited -> half size" if half else "no social topic (neutral)"
+            social_why = "no social topic (not a buy signal)"
         self.watch.pop(mint, None)
         if len(self.pos) >= rules["max_open"]:
             return self.skip(key, f"max {rules['max_open']} open", False, coin)
@@ -580,10 +738,7 @@ class Feed:
         usd = min(usd, self.cash)
         if usd < 20:
             return self.skip(key, "no cash", False, coin)
-        sentiment_buy = (
-            isinstance(snap, dict) and not half and snap["mention_volume"] >= rules["p3_min_mentions"]
-            and snap["sentiment_0_100"] >= rules["p3_min_sentiment"]
-        )
+        sentiment_buy = sentiment_tier in ("strong", "neutral")
         social_values = snap if isinstance(snap, dict) else {}
         created = coin.get("created_timestamp")
         quote = float(coin.get("market_cap_quote") or 0)
@@ -632,6 +787,39 @@ class Feed:
             else:
                 sim_why = f", v8 SIM {decision['decision']} {tag}"
                 self.ev(f"v8 SIM {str(decision['decision']).upper()} {key} {tag} -> size ${usd:.0f} trail {trail}%")
+        # Clean in-band names get a bounded lift inside $130–160. Borderline names
+        # do not: their haircut below is the risk control, only eased when sentiment is strong.
+        if sentiment_tier == "strong" and not holder_gap and curve >= float(rules["early_curve_pct"]):
+            score_n = float(snap["sentiment_0_100"])
+            span = float(rules["size_max"]) - float(rules["size_min"])
+            margin = sentiment_size_margin(score_n, rules)
+            lift = min(float(rules["size_max"]) - usd, float(rules["sentiment_size_weight"]) * margin * span)
+            if lift > 0.5:
+                usd += lift
+                social_why += f", sentiment weight +${lift:.0f}"
+        # These multipliers are the intended ticket. They are not a depth resize,
+        # and they do not turn a missing holder read into a measured pass.
+        border_mult = float(rules["sentiment_border_size_mult"]) if sentiment_tier == "strong" else None
+        size_notes = []
+        if holder_gap:
+            mult = border_mult if border_mult is not None else float(rules["holder_gap_size_mult"])
+            usd *= mult
+            note = f"holders unverified (RPC unavailable), size x{mult:.2f}"
+            if border_mult is not None:
+                note += f", lifted by social {snap['sentiment_0_100']}/100"
+            size_notes.append(note)
+        if curve < float(rules["early_curve_pct"]):
+            mult = border_mult if border_mult is not None else float(rules["early_curve_size_mult"])
+            usd *= mult
+            note = f"early curve {curve}% < {rules['early_curve_pct']}, size x{mult:.2f}"
+            if border_mult is not None:
+                note += f", lifted by social {snap['sentiment_0_100']}/100"
+            size_notes.append(note)
+        if size_notes:
+            sim_why += ", " + ", ".join(size_notes)
+        usd = min(usd, self.cash)
+        if usd < 20:
+            return self.skip(key, "no cash", False, coin)
         drag_limit = float(rules["impact_max_drag_pct"])
         if drag_limit > -100:
             drag = flat_round_trip_pct(
@@ -656,9 +844,11 @@ class Feed:
         )
         entry_eff = filled["entry_eff"]
         feat["size_pct_equity"] = round(100 * usd / max(self.equity(), 1), 2)
+        top10_why = f"top10 {top10}%" if top10 is not None else "top10 unverified"
+        dev_why = f"dev {dev}%" if dev is not None else "dev unverified"
         why = (
             f"v8 PASS: curve {watch['curve']}->{curve}%, {accel_why}, {flow_why}, {late_why}, {social_why}, "
-            f"top10 {top10}%, dev {dev}%, fill eff ${entry_eff:,.0f} vs spot ${mcap:,.0f}{sim_why}"
+            f"{top10_why}, {dev_why}, fill eff ${entry_eff:,.0f} vs spot ${mcap:,.0f}{sim_why}"
         )
         self.traded.add(key)
         self.cash -= usd
@@ -736,6 +926,16 @@ class Feed:
             self.ev(f"RECHECK {watch['key']} after {age:.0f}s observed {tier} ({self._watch_reason(watch)})")
             if self._watch_complete(watch) and age >= long_duration:
                 self.evaluate(coin, first=False)
+            else:
+                # Retry before the decision. A real over-cap reading skips. A still-missing
+                # rate limit stays a gap and does not invent holder percents.
+                retry, retry_reason, _retry_fields = self.holder_verdict(coin)
+                if retry == "skip":
+                    self.skip(watch["key"], retry_reason, False, coin)
+                    continue
+                if retry == "gap" and not watch.get("holder_gap"):
+                    self.ev(f"HOLD {watch['key']} holders unverified (RPC), still watching")
+                watch["holder_gap"] = retry == "gap"
 
     def close(self, key, spot, why, frac=1.0, exit_eff=None):
         position = self.pos[key]
@@ -1040,7 +1240,12 @@ def main():
         stop_delay = feed.strategy["pos_check_s"]
         signal.signal(signal.SIGTERM, lambda *args: (_ for _ in ()).throw(SystemExit))
         feed.ev(
-            f"feed start PAPER strategy v8+distribution, position check {stop_delay}s, "
+            f"feed start PAPER strategy v8+distribution, curve "
+            f"{feed.strategy['min_curve_pct']}-{feed.strategy['max_curve_pct']}% "
+            f"(early <{feed.strategy['early_curve_pct']}% at x{feed.strategy['early_curve_size_mult']}, "
+            f"holder RPC gap at x{feed.strategy['holder_gap_size_mult']}, "
+            f"strong sentiment clears those cuts), "
+            f"position check {stop_delay}s, "
             f"lunarcrush={feed.lc.mode}, listing=geckoterminal pump-fun pools"
         )
         while True:
