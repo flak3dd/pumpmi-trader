@@ -10,11 +10,73 @@ import json, math, os
 from pathlib import Path
 from .rules import CoinMetrics
 
+# HTTP statuses that mean "the read did not happen", not "the payload is unsafe".
+_TRANSIENT_HTTP = {408, 425, 429, 500, 502, 503, 504}
+# Public Solana RPC rate-limit / node-busy codes seen on getTokenLargestAccounts.
+_TRANSIENT_RPC = {429, -32005, -32429}
+_TRANSIENT_TEXT = (
+    "timeout", "timed out", "429", "too many request", "rate limit", "temporarily unavailable", "max usage",
+)
+_TRANSIENT_TYPES = {"URLError", "RemoteDisconnected", "ProtocolError", "ConnectionResetError"}
+
 # Same public coin fields the optimizer holder read already trusts.
 _CURVE_TOKEN_KEYS = (
     "associated_bonding_curve", "associatedBondingCurve", "curve_token_account",
     "curveTokenAccount", "bonding_curve", "bondingCurve",
 )
+
+
+def rpc_failure_kind(exc: BaseException) -> str:
+    """``transient`` when the RPC never returned a holder list. ``corrupt`` otherwise.
+
+    A 429, timeout, or connection failure is not a concentration reading and it is
+    not proof the payload was forged. An HTTP 4xx other than 429, or a parser
+    error, is unusable data and stays fail-closed. This does not invent a percent.
+    """
+    code = getattr(exc, "code", None)
+    code_int = None
+    if code is not None and not isinstance(code, bool):
+        try:
+            code_int = int(code)
+        except (TypeError, ValueError):
+            code_int = None
+    if code_int in _TRANSIENT_HTTP:
+        return "transient"
+    if code_int is not None:
+        return "corrupt"
+    text = f"{type(exc).__name__} {exc}".lower()
+    if any(token in text for token in _TRANSIENT_TEXT):
+        return "transient"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "transient"
+    if type(exc).__name__ in _TRANSIENT_TYPES:
+        return "transient"
+    return "corrupt"
+
+
+def rpc_error_kind(error: object) -> str:
+    """Classify a JSON-RPC ``error`` object. Missing shape is corrupt, not a zero."""
+    if not isinstance(error, dict):
+        return "corrupt"
+    code = error.get("code")
+    try:
+        code_int = int(code) if code is not None and not isinstance(code, bool) else None
+    except (TypeError, ValueError):
+        code_int = None
+    message = str(error.get("message") or "").lower()
+    if code_int in _TRANSIENT_RPC or any(token in message for token in _TRANSIENT_TEXT):
+        return "transient"
+    return "corrupt"
+
+
+def rpc_payload_kind(payload: object) -> str | None:
+    """``None`` when the body has no RPC error. Otherwise ``transient`` or ``corrupt``."""
+    if not isinstance(payload, dict):
+        return "corrupt"
+    error = payload.get("error")
+    if not error:
+        return None
+    return rpc_error_kind(error)
 
 
 def curve_token_accounts(coin: dict) -> set:

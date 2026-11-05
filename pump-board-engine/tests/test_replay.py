@@ -1,6 +1,7 @@
 import json
 
-from src.replay import fee_only_pnl, report
+from src.live_feed import STRAT
+from src.replay import _band, fee_only_pnl, report
 
 
 def test_fee_only_flat_spot_is_a_loss_and_replay_splits_the_curve_band(tmp_path):
@@ -15,7 +16,8 @@ def test_fee_only_flat_spot_is_a_loss_and_replay_splits_the_curve_band(tmp_path)
     ]
     history = [
         {"key": "KEEP", "side": "BUY", "curve_pct": 40, "ts": 10, "sentiment_buy": False},
-        {"key": "EARLY", "side": "BUY", "curve_pct": 22, "ts": 11, "sentiment_buy": False},
+        # 1% stays outside the paper band. The fresh-pool mass at 8% and 22% is inside it.
+        {"key": "EARLY", "side": "BUY", "curve_pct": 1, "ts": 11, "sentiment_buy": False},
         {"key": "LATE", "side": "BUY", "curve_pct": 78, "ts": 12, "sentiment_buy": True, "mint": "late-mint",
          "sentiment_0_100": 80, "mention_volume": 100, "mcap": 40000, "replies": 1, "top10_pct": 10,
          "dev_pct": 1, "bundle_pct": 1, "rise_pts": 1, "size_pct_equity": 1, "age_s": 100},
@@ -35,6 +37,13 @@ def test_fee_only_flat_spot_is_a_loss_and_replay_splits_the_curve_band(tmp_path)
     assert summary["curve_band"]["keep"] == 1
     assert summary["curve_band"]["reject"] == 1
     assert summary["curve_band"]["reject_needs_breadth"] == 1
+    assert _band(1, STRAT) == "reject"
+    assert _band(2, STRAT) == "keep"
+    assert _band(8, STRAT) == "keep"
+    assert _band(15, STRAT) == "keep"
+    assert _band(22, STRAT) == "keep"
+    assert _band(86, STRAT) == "reject"
+    assert _band(78, STRAT) == "reject_needs_breadth"
     assert summary["similarity"]["boost_new"] == 0
     assert "swap tape" in summary["not_replayable"][0]
     path = tmp_path / "report.json"
